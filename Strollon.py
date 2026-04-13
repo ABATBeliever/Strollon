@@ -35,7 +35,6 @@ from pathlib import Path
 # =====================================================================
 # OS チェック
 # 対応: Linux (Wayland) / Windows 11+
-# それ以外は即終了（QApplication 生成前なので stderr に素の print）
 # =====================================================================
 
 _SYSTEM = platform.system().lower()
@@ -54,10 +53,22 @@ if _SYSTEM not in ("linux", "windows"):
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "0.1.0.0"
-BROWSER_VERSION_NAME     = "0.1.0.0"
+BROWSER_VERSION_SEMANTIC = "0.2.0.0"
+BROWSER_VERSION_NAME     = "0.2.0.0"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
+# =====================================================================
+# インストール種別フラグ
+# =====================================================================
+# INSTALL = True  → インストール版（XDG モード固定）
+# INSTALL = False → ポータブル版（実行ファイル隣のディレクトリを使用）
+# =====================================================================
+
+INSTALL: bool = True
+
+# =====================================================================
+# アーキテクチャ検出
+# =====================================================================
 
 def detect_browser_target_architecture() -> str:
     machine = platform.machine().lower()
@@ -125,11 +136,9 @@ def _get_exe_dir() -> Path:
 
 _EXE_DIR = _get_exe_dir()
 
+
 def _get_default_downloads_dir() -> Path:
-    """
-    OS の標準ダウンロードフォルダを返す。
-    Linux / Windows ともに ~/Downloads が一般的。
-    """
+    """OS の標準ダウンロードフォルダ（~/Downloads）を返す。"""
     return Path.home() / "Downloads"
 
 
@@ -137,10 +146,10 @@ def _get_default_downloads_dir() -> Path:
 # 設定ファイル名（OS ごと）
 # =====================================================================
 
-_CONFIG_FILENAME = "config.toml" if _SYSTEM == "linux" else "config.ini"
+_CONFIG_FILENAME = "config.ini"  # Linux/Windows 共通で INI を使用
 
 # =====================================================================
-# XDG ベースパス（Linux: XDG 標準、Windows: ホーム配下の XDG 風）
+# XDG ベースパス
 # =====================================================================
 
 _APP_NAME = "Strollon"
@@ -158,32 +167,34 @@ else:
     _xdg_state_base  = _home / ".local" / "state"
 
 # =====================================================================
-# モード解決
+# モード確定
 # =====================================================================
-# 優先順位:
-#   1. 実行ファイル隣の config/ に設定ファイルが存在 → ポータブルモード
-#   2. XDG / ホーム配下の設定ファイルが存在         → XDG モード
-#   3. どちらもない                                  → 未設定（ようこそ画面へ）
+# INSTALL = True  → 常に "xdg"
+# INSTALL = False → EXE_DIR/config/<filename> があれば "portable"（なくても "portable"）
+#
+# 初回起動（設定ファイルが存在しない）かどうかは IS_FIRST_RUN で持つ。
+# IS_FIRST_RUN = True のとき browser.py がウェルカムページを最初のタブで開く。
 # =====================================================================
 
-# ポータブルの設定ファイルは EXE_DIR/config/<filename>
-# (_apply_dirs("portable") で CONFIG_DIR = EXE_DIR/config/ になるため)
-_PORTABLE_CONFIG_FILE = _EXE_DIR / "config" / _CONFIG_FILENAME
-_XDG_CONFIG_FILE      = _xdg_config_base / _APP_NAME / _CONFIG_FILENAME
+def _determine_mode() -> str:
+    return "xdg" if INSTALL else "portable"
 
+INSTALL_MODE: str = _determine_mode()
 
-def _resolve_mode() -> "str | None":
-    if _PORTABLE_CONFIG_FILE.exists():
-        return "portable"
-    if _XDG_CONFIG_FILE.exists():
-        return "xdg"
-    return None
+_portable_config = _EXE_DIR / "config" / _CONFIG_FILENAME
+_xdg_config      = _xdg_config_base / _APP_NAME / _CONFIG_FILENAME
 
+def _is_first_run() -> bool:
+    """設定ファイルが存在しない＝初回起動。"""
+    if INSTALL_MODE == "xdg":
+        return not _xdg_config.exists()
+    else:
+        return not _portable_config.exists()
 
-_BOOT_MODE: "str | None" = _resolve_mode()
+IS_FIRST_RUN: bool = _is_first_run()
 
 # =====================================================================
-# ディレクトリ確定（モードに応じて切り替え）
+# ディレクトリ確定
 # =====================================================================
 
 def _build_dirs(mode: str) -> "tuple[Path, Path, Path, Path]":
@@ -205,7 +216,7 @@ def _build_dirs(mode: str) -> "tuple[Path, Path, Path, Path]":
 
 
 def _apply_dirs(mode: str):
-    """グローバルなパス定数群を指定モードで（再）設定する。"""
+    """グローバルなパス定数群を指定モードで設定する。"""
     global CONFIG_DIR, DATA_DIR, CACHE_DIR, STATE_DIR
     global THEMES_DIR, CONFIG_FILE
     global HISTORY_DB, SESSION_FILE, BOOKMARKS_DB, DOWNLOADS_DB, DOWNLOADS_DIR
@@ -235,16 +246,11 @@ def _apply_dirs(mode: str):
     INCOGNITO_STATE_PATH = STATE_DIR / "incognito_storage"
 
 
-# 初期適用（モード未確定なら暫定 XDG。ようこそ後に _apply_dirs が再実行される）
-_apply_dirs(_BOOT_MODE if _BOOT_MODE is not None else "xdg")
-INSTALL_MODE: str = _BOOT_MODE if _BOOT_MODE is not None else "xdg"
+# モード確定後にすぐディレクトリを設定する（QApplication より前）
+_apply_dirs(INSTALL_MODE)
 
 # =====================================================================
 # ロガー / log() 関数
-# =====================================================================
-# ・起動ヘッダー（名前・URL など）は素の print() でコンソールのみ出力
-# ・それ以外の全メッセージは log() を使い、コンソール＋ファイルに記録
-# ・builtins.print の書き換えは行わない
 # =====================================================================
 
 def _setup_logger() -> logging.Logger:
@@ -276,13 +282,8 @@ logger = _setup_logger()
 
 def log(msg: str):
     """
-    アプリケーション共通ログ関数。コンソール＋ファイルに出力する。
-    先頭の [ERROR] / [WARN] でレベルを自動判定する。
-
-    使い方:
-        log("[INFO] タブを追加しました")
-        log("[WARN] 設定ファイルが見つかりません")
-        log("[ERROR] DB の初期化に失敗しました")
+    アプリケーション共通ログ関数。コンソール＋ファイルに出力。
+    [ERROR] / [WARN] プレフィックスでレベルを自動判定する。
     """
     upper = msg.upper()
     if upper.startswith("[ERROR]"):
@@ -292,8 +293,9 @@ def log(msg: str):
     else:
         logger.info(msg)
 
+
 # =====================================================================
-# 設定管理クラス（config.toml / config.ini 一本化）
+# 設定管理クラス（config.ini 統一）
 # =====================================================================
 
 class StrollonSettings:
@@ -310,7 +312,7 @@ class StrollonSettings:
         "homepage":                     "https://www.google.com",
         "startup_action":               0,
         "save_session":                 True,
-        "search_engine":                0,
+        "search_engine":                1,  # 既定: Bing
         "clear_on_exit":                False,
         "do_not_track":                 True,
         "download_dir":                 "",
@@ -335,6 +337,8 @@ class StrollonSettings:
         "flag_autoplay":     False,
         "flag_raw_draw":     False,
         "flag_no_cros_vd":   False,
+        # ウィンドウ設定
+        "always_on_top":     False,
     }
 
     def __init__(self):
@@ -350,25 +354,9 @@ class StrollonSettings:
         if not path.exists():
             return
         try:
-            if _SYSTEM == "linux":
-                self._load_toml(path)
-            else:
-                self._load_ini(path)
+            self._load_ini(path)
         except Exception as e:
             log(f"[WARN] 設定ファイルの読み込みに失敗しました: {e}")
-
-    def _load_toml(self, path: Path):
-        try:
-            import tomllib
-        except ImportError:
-            try:
-                import tomli as tomllib  # type: ignore[no-redef]
-            except ImportError:
-                log("[WARN] tomllib/tomli が見つかりません。デフォルト設定を使用します。")
-                return
-        with open(path, "rb") as f:
-            raw = tomllib.load(f)
-        self._data = raw.get("strollon", {})
 
     def _load_ini(self, path: Path):
         import configparser
@@ -378,22 +366,7 @@ class StrollonSettings:
             self._data = dict(cfg["strollon"])
 
     def reload(self):
-        """_apply_dirs() 後にパスが変わった場合に再ロードする。"""
         self._load()
-
-    def _save_toml(self, path: Path):
-        lines = ["[strollon]\n"]
-        for k, v in sorted(self._data.items()):
-            if isinstance(v, bool):
-                lines.append(f"{k} = {'true' if v else 'false'}\n")
-            elif isinstance(v, int):
-                lines.append(f"{k} = {v}\n")
-            elif isinstance(v, float):
-                lines.append(f"{k} = {v}\n")
-            else:
-                escaped = str(v).replace("\\", "\\\\").replace('"', '\\"')
-                lines.append(f'{k} = "{escaped}"\n')
-        path.write_text("".join(lines), encoding="utf-8")
 
     def _save_ini(self, path: Path):
         import configparser
@@ -424,10 +397,7 @@ class StrollonSettings:
     def sync(self):
         path = self._current_path()
         try:
-            if _SYSTEM == "linux":
-                self._save_toml(path)
-            else:
-                self._save_ini(path)
+            self._save_ini(path)
             log("[INFO] Settings saved")
         except Exception as e:
             log(f"[ERROR] 設定ファイルの書き込みに失敗しました: {e}")
@@ -511,13 +481,9 @@ def check_db_version(db_path, label: str = "") -> bool:
 sys.modules.setdefault("constants", sys.modules[__name__])
 
 # =====================================================================
-# STYLES をモジュールレベルで公開
+# STYLES をモジュールレベルで公開（browser.py 等の import 用プロキシ）
 # =====================================================================
-# browser.py / dialogs.py が from constants import STYLES できるよう、
-# theme.STYLES をここで公開しておく。
-# テーマ初期化（init_theme_engine）は main() 内でモード確定後に行われるが、
-# theme.STYLES 自体はモジュール変数として常に存在するため参照可能。
-# （テーマ未初期化時は空辞書 {} が返る）
+
 import theme as _theme_module
 
 
@@ -532,118 +498,6 @@ class _StylesProxy:
 
 
 STYLES = _StylesProxy()
-
-# =====================================================================
-# ようこそダイアログ（初回起動時のモード選択）
-# =====================================================================
-
-def _show_welcome_dialog() -> "str | None":
-    """
-    XDG / ポータブルのどちらを使うか選ばせる。
-    戻り値: "xdg" | "portable" | None（キャンセル→終了）
-    """
-    from PySide6.QtWidgets import (
-        QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-        QPushButton, QRadioButton, QButtonGroup, QFrame,
-    )
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QFont
-
-    dlg = QDialog()
-    dlg.setWindowTitle("Strollon Browser Preview へようこそ")
-    dlg.setMinimumWidth(540)
-    dlg.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
-
-    layout = QVBoxLayout(dlg)
-    layout.setContentsMargins(32, 28, 32, 24)
-    layout.setSpacing(16)
-
-    title = QLabel("<h2>Strollon Browser Previewへようこそ</h2>")
-    title.setAlignment(Qt.AlignCenter)
-    layout.addWidget(title)
-
-    sub = QLabel("※Preview版であり、互換性や安定性は保証されません。<br>データの保存場所を選んでください。後から変更することはできません。")
-    sub.setAlignment(Qt.AlignCenter)
-    sub.setWordWrap(True)
-    layout.addWidget(sub)
-
-    sep1 = QFrame(); sep1.setFrameShape(QFrame.HLine); sep1.setFrameShadow(QFrame.Sunken)
-    layout.addWidget(sep1)
-
-    # ---- XDG モード ----
-    radio_xdg = QRadioButton("XDG互換のインストール")
-    radio_xdg.setChecked(True)
-    radio_xdg.setFont(QFont("", 10, QFont.Bold))
-    layout.addWidget(radio_xdg)
-
-    if _SYSTEM == "linux":
-        xdg_detail = (
-            f"このモードは、XDG準拠の場所にファイルを生成します。\n長期的に運用する場合や、OS単位でバックアップする場合におすすめ。\n"
-            f"設定      : {_xdg_config_base / _APP_NAME}\n"
-            f"データ    : {_xdg_data_base   / _APP_NAME}\n"
-            f"キャッシュ: {_xdg_cache_base / _APP_NAME}\n"
-            f"ログ等    : {_xdg_state_base  / _APP_NAME}"
-        )
-    else:
-        xdg_detail = (
-            f"このモードは、XDG準拠の場所にファイルを生成します。\n長期的に運用する場合や、OS単位でバックアップする場合におすすめ。\n"
-            f"設定    : {_xdg_config_base / _APP_NAME}\n"
-            f"データ  : {_xdg_data_base   / _APP_NAME}\n"
-            f"キャッシュ: {_xdg_cache_base / _APP_NAME}\n"
-            f"ログ等  : {_xdg_state_base  / _APP_NAME}"
-        )
-    xdg_desc = QLabel(xdg_detail)
-    xdg_desc.setStyleSheet("color: #555; font-size: 9pt; margin-left: 22px;")
-    xdg_desc.setWordWrap(False)
-    layout.addWidget(xdg_desc)
-
-    layout.addSpacing(4)
-
-    # ---- ポータブルモード ----
-    radio_portable = QRadioButton("ポータブル(実行ファイルのパス)")
-    radio_portable.setFont(QFont("", 10, QFont.Bold))
-    layout.addWidget(radio_portable)
-
-    # Path の str() は OS のパス区切り文字を使う（Windows は \、Linux は /）
-    portable_detail = (
-        f"このモードは、実行ファイルと同じ場所にファイルを生成します。\nUSBファイルなどに入れて持ち歩く場合や、ファイルを簡単に管理したい場合はこちらがおすすめ。\n"
-        f"設定      : {_EXE_DIR / 'config'}\n"
-        f"データ    : {_EXE_DIR / 'data'}\n"
-        f"キャッシュ: {_EXE_DIR / 'cache'}\n"
-        f"ログ等    : {_EXE_DIR / 'state'}"
-    )
-    portable_desc = QLabel(portable_detail)
-    portable_desc.setStyleSheet("color: #555; font-size: 9pt; margin-left: 22px;")
-    portable_desc.setWordWrap(False)
-    layout.addWidget(portable_desc)
-
-    group = QButtonGroup(dlg)
-    group.addButton(radio_xdg,      0)
-    group.addButton(radio_portable, 1)
-
-    sep2 = QFrame(); sep2.setFrameShape(QFrame.HLine); sep2.setFrameShadow(QFrame.Sunken)
-    layout.addWidget(sep2)
-
-    btn_row = QHBoxLayout()
-    btn_row.addStretch()
-
-    btn_cancel = QPushButton("終了")
-    btn_cancel.setMinimumWidth(90)
-    btn_cancel.clicked.connect(dlg.reject)
-    btn_row.addWidget(btn_cancel)
-
-    btn_ok = QPushButton("この設定で開始する")
-    btn_ok.setMinimumWidth(130)
-    btn_ok.setDefault(True)
-    btn_ok.clicked.connect(dlg.accept)
-    btn_row.addWidget(btn_ok)
-
-    layout.addLayout(btn_row)
-
-    if dlg.exec() != QDialog.Accepted:
-        return None
-    return "portable" if radio_portable.isChecked() else "xdg"
-
 
 # =====================================================================
 # 起動前チェック: データバージョン整合性
@@ -703,15 +557,14 @@ def _check_data_version_conflicts() -> bool:
 # =====================================================================
 
 def main():
-    global INSTALL_MODE
-
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QFont
-    # ---- 起動ヘッダー（素の print でコンソールのみ・ログファイルには書かない） ----
+
+    # ---- 起動ヘッダー（コンソールのみ） ----
     print(f"\n{BROWSER_FULL_NAME}")
     print("\nCopyright (C) 2025-2026 ABATBeliever")
-    print("Strollon Website     | https://abatbeliever.net/software/bin/Strollon/")
-    print("Strollon Github Repo | https://github.com/ABATBeliever/Strollon/")
+    print("Strollon Website     | https://abatbeliever.net/app/Strollon/")
+    print("Strollon Github Repo | https://github.com/ABATBeliever/Strollon")
 
     from browser import apply_chromium_flags_from_settings
     apply_chromium_flags_from_settings()
@@ -721,25 +574,7 @@ def main():
     font.setPointSize(8)
     app.setFont(font)
 
-    # ---- モード解決 ----
-    if _BOOT_MODE is None:
-        log("[INFO] 設定ファイルが見つかりません。")
-        chosen_mode = _show_welcome_dialog()
-        if chosen_mode is None:
-            log("[INFO] セットアップがキャンセルされました。終了します。")
-            sys.exit(0)
-
-        _apply_dirs(chosen_mode)
-        INSTALL_MODE = chosen_mode
-        settings.reload()
-        settings.setValue("install_mode", chosen_mode)
-        settings.sync()
-        log(f"[INFO] モードを選択しました: {chosen_mode}")
-    else:
-        INSTALL_MODE = _BOOT_MODE
-        log(f"[INFO] 設定ファイルを検出しました。モード: {INSTALL_MODE}")
-
-    # ---- テーマ初期化（1回のみ・モード確定後） ----
+    # ---- テーマ初期化（1回のみ・ディレクトリ確定後） ----
     from theme import init_theme_engine
     theme_name = settings.value("theme", "Default")
     init_theme_engine(THEMES_DIR, theme_name)
@@ -748,12 +583,19 @@ def main():
 
     # ---- ログ出力 ----
     log(f"[INFO] OS           : {platform.system()} ({BROWSER_TARGET_ARCHITECTURE})")
+    log(f"[INFO] Install      : {'インストール版 (XDG)' if INSTALL else 'ポータブル版'}")
     log(f"[INFO] Mode         : {INSTALL_MODE}")
+    log(f"[INFO] First Run    : {IS_FIRST_RUN}")
     log(f"[INFO] Config File  : {CONFIG_FILE}")
     log(f"[INFO] Data Dir     : {DATA_DIR}")
     log(f"[INFO] Themes Dir   : {THEMES_DIR}")
     log(f"[INFO] Log File     : {LOG_FILE}")
     log(f"[INFO] Theme        : {theme_name}")
+
+    # 初回起動時: 設定ファイルを新規作成（空の状態で sync するだけ）
+    if IS_FIRST_RUN:
+        log("[INFO] 初回起動: 設定ファイルを新規作成します")
+        settings.sync()
 
     if not _check_data_version_conflicts():
         sys.exit(0)

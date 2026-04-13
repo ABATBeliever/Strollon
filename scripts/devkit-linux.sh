@@ -33,7 +33,7 @@ echo
 echo "[SUCCESS]"
 echo
 echo "Run :"
-echo "uv run python StrollonBrowser.py"
+echo "uv run python Strollon.py"
 echo
 echo "Build : (AppImage)"
 echo "sudo apt/dnf/other install binutils patchelf gcc build-essential"

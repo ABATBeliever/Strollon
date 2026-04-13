@@ -330,7 +330,7 @@ class MainDialog(QDialog):
         engine_layout.addWidget(QLabel("検索エンジン:"))
         self.search_engine_combo = QComboBox()
         self.search_engine_combo.addItems(["Google", "Bing", "DuckDuckGo", "Yahoo! JAPAN"])
-        self.search_engine_combo.setCurrentIndex(self.settings.value("search_engine", 0, type=int))
+        self.search_engine_combo.setCurrentIndex(self.settings.value("search_engine", 1, type=int))
         self.search_engine_combo.currentIndexChanged.connect(
             lambda v: self._apply_setting("search_engine", v))
         engine_layout.addWidget(self.search_engine_combo)
@@ -451,7 +451,7 @@ class MainDialog(QDialog):
         experimental_layout = QVBoxLayout()
         experimental_layout.addSpacing(8)
 
-        flags_label = QLabel("実験的機能 (* = 再起動が必要):")
+        flags_label = QLabel("実験的機能 ( * = 再起動が必要):")
         flags_label.setStyleSheet("font-weight: bold; color: #c0392b;")
         experimental_layout.addWidget(flags_label)
 
@@ -611,7 +611,7 @@ class MainDialog(QDialog):
             self.homepage_input.setText("https://www.google.com")
             self.startup_combo.setCurrentIndex(0)
             self.save_session_check.setChecked(True)
-            self.search_engine_combo.setCurrentIndex(0)
+            self.search_engine_combo.setCurrentIndex(1)  # Bing
             self.clear_on_exit_check.setChecked(False)
             self.do_not_track_check.setChecked(True)
             self.download_dir_input.setText(str(_get_default_downloads_dir()))

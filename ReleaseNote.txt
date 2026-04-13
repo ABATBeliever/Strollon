@@ -1,3 +1,21 @@
+0.2.0.0 Preview
+[新機能]
+・初回起動時にようこそ 画面を表示するようになりました
+・最前面表示にするオプションを追加しました
+・SendURL機能(ページを別のブラウザで開かせる)を追加しました
+1. Windowsの場合: 常にMSEdge/Chrome/Firefox指定
+2. Linuxの場合  : MSEdge/Chrome/Chromium/Firefox/Floorp/Falkon/Konquerorを検索し、あるものを表示
+[改善]
+・タブが開くときの挙動を変更しました
+・既定の検索エンジンをBingに変更しました
+・設定ファイルをini/toml混在からiniに統一するようにしました
+・XDG準拠とポータブルインストールについて、選択するモードから、配布形式で自動指定するように変更しました。
+1. Windows インストーラー版: 常にXDG準拠
+2. Windows ポータブル版    : 常にポータブル
+3. Linux AppImage版        : 常にXDG準拠
+[削除]
+・tomlファイルのサポート
+
 0.1.0.0 Preview
 VELA Praxis 2.1.3.0をベースに開発した、初のバージョン　
 

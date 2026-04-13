@@ -76,7 +76,8 @@ from PySide6.QtGui import QFont, QAction, QShortcut, QKeySequence
 import qtawesome as qta
 
 from constants import STYLES, BROWSER_FULL_NAME, BROWSER_VERSION_SEMANTIC, DOWNLOADS_DIR, USER_AGENT_PRESETS, \
-    PROFILE_PATH, INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH, CACHE_DIR, CHECK_FOR_UPDATES, settings, log
+    PROFILE_PATH, INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH, CACHE_DIR, CHECK_FOR_UPDATES, settings, log, \
+    IS_FIRST_RUN, BROWSER_VERSION_NAME, INSTALL, INSTALL_MODE
 from managers import HistoryManager, BookmarkManager, DownloadManager, SessionManager, UpdateChecker
 from dialogs import AddBookmarkDialog, MainDialog, FindDialog, SavePageDialog
 
@@ -151,30 +152,52 @@ class UrlLineEdit(QLineEdit):
 
 class CustomWebEnginePage(QWebEnginePage):
     """新しいウィンドウ/タブの処理をカスタマイズしたWebEnginePage"""
-    
+
     new_tab_requested = Signal(QUrl)
-    
+
     def __init__(self, profile, parent=None):
         super().__init__(profile, parent)
         self._profile = profile
 
-    def createWindow(self, window_type):
-        """
-        新しいウィンドウ/タブが要求された時の処理。
-        （2.1.2.0 でゴーストオーディオ・重複タブを修正済み）
-        """
-        log("[INFO] TabControl: createWindow requested")
-        browser = self.parent()
-        while browser and not isinstance(browser, VerticalTabBrowser):
-            browser = browser.parent()
+    def _find_browser(self):
+        """親ウィジェットをたどって VerticalTabBrowser を返す"""
+        w = self.parent()
+        while w and not isinstance(w, VerticalTabBrowser):
+            w = w.parent()
+        return w
 
+    def createWindow(self, window_type):
+        """target="_blank" / window.open() などで新タブが要求されたとき"""
+        log("[INFO] TabControl: createWindow requested")
+        browser = self._find_browser()
         if browser:
-            web_view = browser.add_new_tab(url="about:blank", activate=False, incognito=False,
-                                           _return_view=True)
+            web_view = browser.add_new_tab(
+                url="about:blank", activate=True, incognito=False, _return_view=True
+            )
             if web_view is not None:
                 return web_view.page()
-
         return super().createWindow(window_type)
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+        """
+        Ctrl+クリック / 中クリックによるリンクを新タブで開く。
+        NavigationTypeLinkClicked かつ修飾キーが押されているときに
+        シグナル経由で新タブを開き、このページへの遷移はキャンセルする。
+        """
+        from PySide6.QtWebEngineCore import QWebEnginePage as _Page
+        from PySide6.QtWidgets import QApplication as _App
+        from PySide6.QtCore import Qt as _Qt
+
+        if (
+            nav_type == _Page.NavigationTypeLinkClicked
+            and is_main_frame
+            and (_App.keyboardModifiers() & (_Qt.ControlModifier | _Qt.MetaModifier))
+        ):
+            browser = self._find_browser()
+            if browser:
+                browser.add_new_tab(url=url.toString(), activate=True)
+            return False  # このページへの遷移をキャンセル
+        return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
 
 # =====================================================================
@@ -297,6 +320,8 @@ class VerticalTabBrowser(QMainWindow):
         self.setup_shortcuts()
         self.check_for_updates()
         self.restore_session()
+        # show() 後に winId() が確定してから always_on_top を適用
+        QTimer.singleShot(0, self._apply_always_on_top)
     
     def apply_settings(self):
         """設定を適用"""
@@ -343,6 +368,7 @@ class VerticalTabBrowser(QMainWindow):
         self._dnt_interceptor.set_enabled(self.do_not_track)
         self._dnt_interceptor_incognito.set_enabled(self.do_not_track)
         log(f"[INFO] DNT header set to: {'1' if self.do_not_track else '0'}")
+
 
         # downloadRequested の重複接続を防ぐために一度切断してから接続
         # 初回起動時は未接続のため RuntimeWarning が出るが無害なので抑制する
@@ -425,7 +451,14 @@ class VerticalTabBrowser(QMainWindow):
         main_layout.addWidget(splitter)
     
     def restore_session(self):
-        """セッションを復元"""
+        """セッションを復元。初回起動時はウェルカムページを表示する。"""
+
+        # 初回起動: ウェルカムページをインライン HTML で開く
+        if IS_FIRST_RUN:
+            log("[INFO] 初回起動: ウェルカムページを表示します")
+            self.add_new_tab(self._welcome_page_url(), activate=True)
+            return
+
         startup_action = self.settings.value("startup_action", 0, type=int)
 
         if startup_action == 0 and self.settings.value("save_session", True, type=bool):
@@ -442,7 +475,6 @@ class VerticalTabBrowser(QMainWindow):
                         opened = 0
                         for i, tab_data in enumerate(tabs_data):
                             url = tab_data.get("url", "")
-                            # about: / chrome: など内部スキームは復元しない
                             if not url or url.startswith("about:") or url.startswith("chrome:"):
                                 continue
                             activate = (i == active_index)
@@ -456,6 +488,89 @@ class VerticalTabBrowser(QMainWindow):
             self.add_new_tab(homepage)
         else:
             self.add_new_tab("https://www.google.com")
+
+    def _welcome_page_url(self) -> str:
+        """
+        初回起動時に表示するウェルカムページを data URI として返す。
+        外部ファイル不要でブラウザ内に直接表示する。
+        """
+        mode_label = "インストール版 (XDG)" if INSTALL else "ポータブル版"
+        html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Strollon へようこそ</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: "Segoe UI", "Noto Sans JP", sans-serif;
+    background: #f4f6fb;
+    color: #222;
+    display: flex;
+    justify-content: center;
+    padding: 48px 16px;
+    min-height: 100vh;
+  }}
+  .card {{
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 2px 16px rgba(0,0,0,.10);
+    max-width: 640px;
+    width: 100%;
+    padding: 48px 48px 40px;
+  }}
+  h1 {{ font-size: 2rem; color: #1a1a2e; margin-bottom: 6px; }}
+  .version {{ color: #4a90d9; font-size: .95rem; margin-bottom: 28px; }}
+  p {{ line-height: 1.75; color: #444; margin-bottom: 14px; }}
+  hr {{ border: none; border-top: 1px solid #e8eaf0; margin: 28px 0; }}
+  .info-table {{ width: 100%; border-collapse: collapse; font-size: .88rem; }}
+  .info-table td {{ padding: 6px 8px; vertical-align: top; }}
+  .info-table td:first-child {{ color: #888; white-space: nowrap; width: 140px; }}
+  .info-table tr:nth-child(even) td {{ background: #f9fafc; border-radius: 4px; }}
+  .tip {{
+    background: #eaf2fb;
+    border-left: 4px solid #4a90d9;
+    border-radius: 4px;
+    padding: 12px 16px;
+    font-size: .88rem;
+    color: #1f5fa5;
+    margin-top: 24px;
+  }}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Strollon へようこそ</h1>
+  <div class="version">Version {BROWSER_VERSION_NAME}</div>
+
+  <p>
+    Strollon は、左側に縦タブを配置したシンプルなWebブラウザです。<br>
+    Chromium エンジン（Qt WebEngine）を使用しており、一般的なWebサイトを快適に閲覧できます。
+  </p>
+  <p>
+    右上の <strong>≡ メニュー</strong> から設定・ブックマーク・履歴などにアクセスできます。<br>
+    タブは左のパネルで管理でき、ドラッグ＆ドロップで並び替えも可能です。
+  </p>
+
+  <hr>
+
+  <table class="info-table">
+    <tr><td>バージョン</td><td>{BROWSER_VERSION_NAME}</td></tr>
+    <tr><td>インストール種別</td><td>{mode_label}</td></tr>
+    <tr><td>対応OS</td><td>Linux (Wayland) / Windows 11+</td></tr>
+    <tr><td>開発者</td><td>ABATBeliever</td></tr>
+    <tr><td>ライセンス</td><td>GNU LGPL v3</td></tr>
+  </table>
+
+  <div class="tip">
+    💡 このページは初回起動時のみ表示されます。次回からはホームページが開きます。
+  </div>
+</div>
+</body>
+</html>"""
+
+        from urllib.parse import quote
+        return "data:text/html;charset=utf-8," + quote(html)
     
     def save_current_session(self):
         """現在のセッションを保存"""
@@ -698,19 +813,41 @@ class VerticalTabBrowser(QMainWindow):
         menu.addAction(save_page_action)
         
         menu.addSeparator()
-        
+
+        # 他のブラウザで開く（サブメニュー）
+        send_menu = QMenu("他のブラウザで開く", self)
+        send_menu.setStyleSheet(STYLES['menu'])
+        send_menu.setIcon(qta.icon('fa5s.external-link-alt', color=STYLES['icon_color_default']))
+        for browser_name, browser_cmd in self._get_external_browsers():
+            act = QAction(browser_name, self)
+            act.triggered.connect(lambda checked=False, cmd=browser_cmd: self._open_in_browser(cmd))
+            send_menu.addAction(act)
+        menu.addMenu(send_menu)
+
+        # 常に最前面（現在の状態に応じてラベルを切り替え）
+        _aot_on = self.settings.value("always_on_top", False, type=bool)
+        _aot_label = "最前面表示を無効にする" if _aot_on else "常に最前面に表示する"
+        aot_action = QAction(
+            qta.icon('fa5s.thumbtack', color=STYLES['icon_color_accent']),
+            _aot_label, self
+        )
+        aot_action.triggered.connect(lambda: self._toggle_always_on_top(not _aot_on))
+        menu.addAction(aot_action)
+
+        menu.addSeparator()
+
         # 設定（設定タブを開く）
         settings_action = QAction(qta.icon('fa5s.cog', color=STYLES['icon_color_default']), "設定", self)
         settings_action.triggered.connect(self.show_main_dialog)
         menu.addAction(settings_action)
-        
+
         # ブラウザについて
         about_action = QAction(qta.icon('fa5s.info-circle', color=STYLES['icon_color_default']), "ブラウザについて", self)
         about_action.triggered.connect(self.show_about_dialog)
         menu.addAction(about_action)
-        
+
         menu.addSeparator()
-        
+
         # 終了
         exit_action = QAction(qta.icon('fa5s.sign-out-alt', color=STYLES['icon_color_danger']), "終了", self)
         exit_action.triggered.connect(self.close)
@@ -721,6 +858,129 @@ class VerticalTabBrowser(QMainWindow):
         if sender:
             menu.exec(sender.mapToGlobal(sender.rect().bottomLeft()))
     
+    def _get_external_browsers(self) -> list:
+        """
+        外部ブラウザのリストを返す。
+        Windows: 存在確認なし（なければ Popen が失敗するだけ）
+        Linux  : shutil.which() で実際にインストール済みのものだけ返す
+        戻り値: [(表示名, コマンド), ...]
+        """
+        import shutil
+        import platform as _pl
+        candidates = []
+        if _pl.system().lower() == "windows":
+            candidates = [
+                ("Microsoft Edge",
+                 r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+                ("Google Chrome",
+                 r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+                ("Mozilla Firefox",
+                 r"C:\Program Files\Mozilla Firefox\firefox.exe"),
+            ]
+        else:  # Linux
+            linux_browsers = [
+                ("Microsoft Edge",  "microsoft-edge"),
+                ("Google Chrome",   "google-chrome"),
+                ("Mozilla Firefox", "firefox"),
+                ("Floorp",          "floorp"),
+                ("Falkon",          "falkon"),
+                ("Konqueror",       "konqueror"),
+                ("Chromium",        "chromium"),
+                ("Chromium",        "chromium-browser"),
+            ]
+            seen_cmd: set = set()
+            for name, cmd in linux_browsers:
+                if cmd not in seen_cmd and shutil.which(cmd):
+                    candidates.append((name, cmd))
+                    seen_cmd.add(cmd)
+            if not candidates:
+                candidates.append(("（利用可能なブラウザが見つかりません）", ""))
+        return candidates
+
+    def _open_in_browser(self, cmd: str, url: str = ""):
+        """指定コマンドの外部ブラウザで URL を開く。
+        url 省略時は現在アクティブなタブの URL を使用する。
+        """
+        if not cmd:
+            return
+        if not url:
+            current_item = self.tab_list.currentItem()
+            if not current_item or not isinstance(current_item, TabItem):
+                return
+            url = current_item.web_view.url().toString()
+        if not url or url.startswith("about:") or url.startswith("data:"):
+            return
+        import subprocess
+        try:
+            subprocess.Popen([cmd, url])
+            log(f"[INFO] SendURL: opened {url} in {cmd}")
+        except Exception as e:
+            log(f"[ERROR] SendURL: failed to open {cmd}: {e}")
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "エラー", f"ブラウザを起動できませんでした:\n{e}")
+
+    def _apply_always_on_top(self):
+        """
+        always_on_top フラグをウィンドウに適用する。
+
+        Windows: ctypes.SetWindowPos で Z-order のみ変更（ウィンドウ破棄なし）。
+                 64bit HWND に対応するため argtypes を明示的に設定する。
+        Linux:   setWindowFlags → 遅延 show でメニュー消滅後に再表示。
+        """
+        import platform as _pl
+        always_on_top = self.settings.value("always_on_top", False, type=bool)
+        log(f"[INFO] _apply_always_on_top: always_on_top={always_on_top}, winId={int(self.winId())}")
+
+        if _pl.system().lower() == "windows":
+            import ctypes
+            import ctypes.wintypes
+
+            # 64bit HWND を正しく渡すために argtypes を明示
+            _SetWindowPos = ctypes.windll.user32.SetWindowPos
+            _SetWindowPos.restype  = ctypes.wintypes.BOOL
+            _SetWindowPos.argtypes = [
+                ctypes.wintypes.HWND,
+                ctypes.wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.wintypes.UINT,
+            ]
+
+            HWND_TOPMOST   = ctypes.wintypes.HWND(-1)
+            HWND_NOTOPMOST = ctypes.wintypes.HWND(-2)
+            SWP_NOMOVE     = 0x0002
+            SWP_NOSIZE     = 0x0001
+            SWP_NOACTIVATE = 0x0010
+
+            hwnd = ctypes.wintypes.HWND(int(self.winId()))
+            z_order = HWND_TOPMOST if always_on_top else HWND_NOTOPMOST
+            ret = _SetWindowPos(
+                hwnd, z_order, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            )
+            err = ctypes.get_last_error() if ret == 0 else 0
+            log(f"[INFO] SetWindowPos ret={ret} err={err} z={'TOPMOST' if always_on_top else 'NOTOPMOST'}")
+        else:
+            from PySide6.QtCore import Qt
+            base_flags = Qt.Window
+            if always_on_top:
+                self.setWindowFlags(base_flags | Qt.WindowStaysOnTopHint)
+            else:
+                self.setWindowFlags(base_flags)
+            QTimer.singleShot(150, self.show)
+            QTimer.singleShot(160, self.raise_)
+            QTimer.singleShot(170, self.activateWindow)
+            log(f"[INFO] AlwaysOnTop (Linux): {always_on_top}")
+
+    def _toggle_always_on_top(self, checked: bool):
+        """常に最前面の設定を切り替えて永続化する"""
+        self.settings.setValue("always_on_top", checked)
+        self.settings.sync()
+        self._apply_always_on_top()
+        log(f"[INFO] Always on top: {checked}")
+
     def show_bookmarks_dialog(self):
         """ブックマークダイアログを表示（現在のページ情報を渡す）"""
         # 現在のタブのURLとタイトルを取得してダイアログに渡す
@@ -983,7 +1243,7 @@ class VerticalTabBrowser(QMainWindow):
             3: f"https://search.yahoo.co.jp/search?p={encoded_query}"
         }
         
-        return search_urls.get(search_engine, search_urls[0])
+        return search_urls.get(search_engine, search_urls[1])  # デフォルト: Bing
     
     def is_valid_url(self, text):
         """URL判定"""
@@ -1040,6 +1300,19 @@ class VerticalTabBrowser(QMainWindow):
         web_view.loadFinished.connect(lambda: self.on_load_finished(web_view, incognito))
         web_view.loadStarted.connect(lambda: self.on_load_started(web_view))
         web_view.loadProgress.connect(lambda p: self.on_load_progress(web_view, p))
+
+        # 中クリックで新タブ
+        def _on_mouse_press(event, _wv=web_view):
+            from PySide6.QtCore import Qt as _Qt
+            if event.button() == _Qt.MiddleButton:
+                hit = _wv.page().hitTestContent(event.pos())
+                url_str = hit.linkUrl().toString() if hit and not hit.linkUrl().isEmpty() else ""
+                if url_str:
+                    self.add_new_tab(url=url_str, activate=True)
+                    event.accept()
+                    return
+            QWebEngineView.mousePressEvent(_wv, event)
+        web_view.mousePressEvent = _on_mouse_press
 
         tab_item = TabItem("新しいタブ", web_view, incognito=incognito)
 
@@ -1320,7 +1593,23 @@ class VerticalTabBrowser(QMainWindow):
             mute_action = QAction(qta.icon('fa5s.volume-mute', color=STYLES['icon_color_default']), "ミュート", self)
             mute_action.triggered.connect(lambda: self.toggle_mute(item))
         menu.addAction(mute_action)
-        
+
+        menu.addSeparator()
+
+        # 他のブラウザで開く（SendURL）
+        send_menu = QMenu("他のブラウザで開く", self)
+        send_menu.setStyleSheet(STYLES['tab_context_menu'])
+        send_menu.setIcon(qta.icon('fa5s.external-link-alt', color=STYLES['icon_color_default']))
+        for browser_name, browser_cmd in self._get_external_browsers():
+            act = QAction(browser_name, self)
+            url_for_send = item.web_view.url().toString()
+            act.triggered.connect(
+                lambda checked=False, cmd=browser_cmd, u=url_for_send:
+                    self._open_in_browser(cmd, url=u)
+            )
+            send_menu.addAction(act)
+        menu.addMenu(send_menu)
+
         menu.exec(self.tab_list.mapToGlobal(position))
     
     def close_tab_by_item(self, item):
@@ -1402,6 +1691,7 @@ class VerticalTabBrowser(QMainWindow):
         if current_item:
             self.close_tab_by_item(current_item)
     
+
     def closeEvent(self, event):
         """終了時の処理"""
         self.save_current_session()
