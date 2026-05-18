@@ -464,28 +464,38 @@ class SessionManager:
 class UpdateChecker(QThread):
     """更新チェックを行うスレッド"""
     update_available = Signal(str, str)
-    
+
     def run(self):
         log("[INFO] UpdateCheck Start")
         try:
-            with urlopen(UPDATE_CHECK_URL, timeout=5) as response:
+            with urlopen(UPDATE_CHECK_URL, timeout=10) as response:
                 content = response.read().decode('utf-8').strip()
+                log(f"[INFO] UpdateCheck Response: {repr(content[:80])}")
                 self.parse_update_info(content)
                 log("[INFO] UpdateCheck Close")
-        except (URLError, Exception) as e:
-            log(f"[INFO] UpdateCheck Failed({e})")
-    
+        except URLError as e:
+            log(f"[INFO] UpdateCheck Failed (URLError): {e.reason}")
+        except Exception as e:
+            log(f"[INFO] UpdateCheck Failed ({type(e).__name__}): {e}")
+
     def parse_update_info(self, content):
         try:
             parts = content.split(',', 2)
-            if len(parts) == 3 and parts[0] == "[Strollon2]":
-                latest_version = parts[1].strip()
-                update_message = parts[2].strip()
-                
-                if version.parse(latest_version) > version.parse(BROWSER_VERSION_SEMANTIC):
-                    log("[INFO] UpdateCheck-> New Version Available")
-                    self.update_available.emit(latest_version, update_message)
-                else:
-                    log("[INFO] UpdateCheck-> Latest")
+            if len(parts) < 3:
+                log(f"[INFO] UpdateCheck: invalid format (parts={len(parts)})")
+                return
+            if parts[0].strip() != "[Strollon2]":
+                log(f"[INFO] UpdateCheck: unexpected header '{parts[0].strip()}'")
+                return
+
+            latest_version = parts[1].strip()
+            update_message = parts[2].strip()
+
+            log(f"[INFO] UpdateCheck: latest={latest_version}, current={BROWSER_VERSION_SEMANTIC}")
+            if version.parse(latest_version) > version.parse(BROWSER_VERSION_SEMANTIC):
+                log("[INFO] UpdateCheck-> New Version Available")
+                self.update_available.emit(latest_version, update_message)
+            else:
+                log("[INFO] UpdateCheck-> Latest")
         except Exception as e:
-            log(f"[INFO] UpdateCheck Failed({e})")
+            log(f"[INFO] UpdateCheck parse failed ({type(e).__name__}): {e}")

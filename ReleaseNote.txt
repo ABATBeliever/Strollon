@@ -1,3 +1,13 @@
+0.3.0.0 Preview
+[新機能]
+・strollon:// の内部URLが追加されました
+　strollon://welcome : ようこそページ
+　strollon://start   : ISMemoria互換のスタート
+[改善]
+・新しいタブの既定値がstrollon://startになりました
+・検索の既定値がDuckDuckGoになりました
+・起動時にログ機能を改善しました
+
 0.2.0.0 Preview
 [新機能]
 ・初回起動時にようこそ 画面を表示するようになりました

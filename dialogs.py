@@ -330,7 +330,7 @@ class MainDialog(QDialog):
         engine_layout.addWidget(QLabel("検索エンジン:"))
         self.search_engine_combo = QComboBox()
         self.search_engine_combo.addItems(["Google", "Bing", "DuckDuckGo", "Yahoo! JAPAN"])
-        self.search_engine_combo.setCurrentIndex(self.settings.value("search_engine", 1, type=int))
+        self.search_engine_combo.setCurrentIndex(self.settings.value("search_engine", 2, type=int))
         self.search_engine_combo.currentIndexChanged.connect(
             lambda v: self._apply_setting("search_engine", v))
         engine_layout.addWidget(self.search_engine_combo)
@@ -608,10 +608,10 @@ class MainDialog(QDialog):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            self.homepage_input.setText("https://www.google.com")
+            self.homepage_input.setText("strollon://start")
             self.startup_combo.setCurrentIndex(0)
             self.save_session_check.setChecked(True)
-            self.search_engine_combo.setCurrentIndex(1)  # Bing
+            self.search_engine_combo.setCurrentIndex(2)  # Duck
             self.clear_on_exit_check.setChecked(False)
             self.do_not_track_check.setChecked(True)
             self.download_dir_input.setText(str(_get_default_downloads_dir()))

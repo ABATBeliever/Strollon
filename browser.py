@@ -77,7 +77,7 @@ import qtawesome as qta
 
 from constants import STYLES, BROWSER_FULL_NAME, BROWSER_VERSION_SEMANTIC, DOWNLOADS_DIR, USER_AGENT_PRESETS, \
     PROFILE_PATH, INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH, CACHE_DIR, CHECK_FOR_UPDATES, settings, log, \
-    IS_FIRST_RUN, BROWSER_VERSION_NAME, INSTALL, INSTALL_MODE
+    IS_FIRST_RUN, IS_UPDATED, BROWSER_VERSION_NAME, INSTALL, INSTALL_MODE
 from managers import HistoryManager, BookmarkManager, DownloadManager, SessionManager, UpdateChecker
 from dialogs import AddBookmarkDialog, MainDialog, FindDialog, SavePageDialog
 
@@ -85,6 +85,652 @@ from dialogs import AddBookmarkDialog, MainDialog, FindDialog, SavePageDialog
 from PySide6.QtCore import QUrl, Signal
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWidgets import QListWidgetItem
+
+
+
+# =====================================================================
+# strollon:// 内部URLスキームハンドラー
+# =====================================================================
+
+from PySide6.QtWebEngineCore import QWebEngineUrlSchemeHandler, QWebEngineUrlRequestJob, QWebEngineUrlScheme
+from PySide6.QtCore import QBuffer, QByteArray
+
+
+def _register_strollon_scheme():
+    """strollon:// スキームをQtWebEngineに登録する（QApplication生成前に呼ぶこと）"""
+    scheme = QWebEngineUrlScheme(b"strollon")
+    scheme.setFlags(
+        QWebEngineUrlScheme.SecureScheme |
+        QWebEngineUrlScheme.LocalScheme |
+        QWebEngineUrlScheme.LocalAccessAllowed |
+        QWebEngineUrlScheme.ContentSecurityPolicyIgnored
+    )
+    QWebEngineUrlScheme.registerScheme(scheme)
+
+
+# Strollon.py の main() より前に呼ぶため、モジュールロード時に実行
+_register_strollon_scheme()
+
+
+def _build_welcome_html(version_name: str, install: bool) -> str:
+    """
+    strollon://welcome 用HTML。
+    「次へ/戻る」ウィザード形式、レガシー調デザイン。
+    ページ構成:
+      0: ようこそ
+      1: アピールポイント
+      2: リリースノート
+      3: 始める (strollon://start へ遷移)
+    """
+    mode_label = "インストール版 (XDG)" if install else "ポータブル版"
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>ようこそ</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  html, body {{
+    height: 100%;
+    font-family: "Segoe UI", "Meiryo", "MS Gothic", sans-serif;
+    font-size: 13px;
+    background: #d4d0c8;
+    color: #000;
+  }}
+  .wizard-shell {{
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }}
+  .wizard-body {{
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }}
+  .sidebar {{
+    width: 164px;
+    min-width: 164px;
+    background: #ffffff;
+    border-right: 1px solid #808080;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 24px;
+    gap: 12px;
+  }}
+  .sidebar-logo {{
+    width: 80px;
+    height: 80px;
+    background: #003087;
+    border: 2px solid #808080;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 11px;
+    font-weight: bold;
+    text-align: center;
+    line-height: 1.4;
+    letter-spacing: 1px;
+  }}
+  .sidebar-logo img {{
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }}
+  .sidebar-ver {{
+    font-size: 10px;
+    color: #888;
+    margin-top: auto;
+    padding-bottom: 12px;
+  }}
+  .content-area {{
+    flex: 1;
+    background: #f0f0f0;
+    overflow: hidden;
+    position: relative;
+  }}
+  .slide {{
+    position: absolute;
+    inset: 0;
+    padding: 28px 32px 16px;
+    opacity: 0;
+    display: none;
+  }}
+  .slide.active {{
+    opacity: 1;
+    display: block;
+  }}
+  .slide-heading {{
+    border-bottom: 1px solid #808080;
+    padding-bottom: 6px;
+    margin-bottom: 16px;
+  }}
+  .slide-heading h1 {{
+    font-size: 15px;
+    font-weight: bold;
+    color: #003087;
+  }}
+  .slide-heading p {{
+    font-size: 11px;
+    color: #444;
+    margin-top: 3px;
+  }}
+  .welcome-text {{
+    font-size: 13px;
+    line-height: 1.8;
+    color: #222;
+    margin-bottom: 14px;
+  }}
+  .welcome-text b {{ color: #003087; }}
+  .infobox {{
+    background: #fff;
+    border: 1px solid #808080;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: #333;
+    line-height: 1.7;
+  }}
+  .feature-table {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }}
+  .feature-table tr {{
+    border-bottom: 1px solid #ccc;
+  }}
+  .feature-table td {{
+    padding: 8px 10px;
+    vertical-align: top;
+  }}
+  .feature-table td.icon-col {{
+    width: 36px;
+    text-align: center;
+    padding-top: 10px;
+  }}
+  .feature-icon {{
+    width: 24px;
+    height: 24px;
+    background: #003087;
+    border: 1px solid #808080;
+    display: inline-block;
+  }}
+  .feature-name {{
+    font-weight: bold;
+    color: #003087;
+    display: block;
+    margin-bottom: 2px;
+  }}
+  .feature-desc {{
+    color: #444;
+    line-height: 1.5;
+  }}
+  .release-scroll {{
+    height: calc(100vh - 220px);
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid #808080;
+    padding: 10px 14px;
+  }}
+  .release-scroll h2 {{
+    font-size: 12px;
+    font-weight: bold;
+    background: #003087;
+    color: #fff;
+    padding: 3px 8px;
+    margin-bottom: 6px;
+    margin-top: 10px;
+  }}
+  .release-scroll h2:first-child {{ margin-top: 0; }}
+  .release-scroll ul {{
+    padding-left: 16px;
+    margin-bottom: 4px;
+  }}
+  .release-scroll li {{
+    font-size: 12px;
+    line-height: 1.8;
+    color: #222;
+  }}
+  .tag {{
+    display: inline-block;
+    font-size: 10px;
+    font-weight: bold;
+    padding: 0 4px;
+    margin-right: 4px;
+    border: 1px solid;
+    vertical-align: middle;
+    line-height: 1.4;
+  }}
+  .tag-new {{ background: #cce0ff; color: #003087; border-color: #003087; }}
+  .tag-fix {{ background: #ccffcc; color: #006400; border-color: #006400; }}
+  .tag-chg {{ background: #fff0cc; color: #804000; border-color: #804000; }}
+  .finish-table {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-bottom: 14px;
+  }}
+  .finish-table th, .finish-table td {{
+    border: 1px solid #808080;
+    padding: 5px 10px;
+    text-align: left;
+  }}
+  .finish-table th {{
+    background: #d4d0c8;
+    width: 130px;
+    font-weight: bold;
+  }}
+  .wizard-footer {{
+    background: #d4d0c8;
+    border-top: 1px solid #808080;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }}
+  .footer-steps {{
+    font-size: 11px;
+    color: #555;
+  }}
+  .footer-btns {{
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }}
+  .btn {{
+    font-size: 12px;
+    font-family: inherit;
+    padding: 4px 18px;
+    border: 1px solid #999;
+    cursor: pointer;
+    font-weight: normal;
+    background: #fff;
+    color: #000;
+    min-width: 80px;
+  }}
+  .btn:hover {{
+    background: #f0f0f0;
+  }}
+  .btn:active {{
+    background: #e0e0e0;
+  }}
+  .btn:disabled {{
+    color: #aaa;
+    border-color: #ccc;
+    cursor: default;
+    background: #f8f8f8;
+  }}
+  .btn-primary {{
+    background: #fff;
+    color: #003087;
+    border-color: #003087;
+    font-weight: bold;
+  }}
+  .btn-primary:hover {{ background: #eaf0ff; }}
+  .btn-finish {{
+    background: #fff;
+    color: #006400;
+    border-color: #006400;
+    font-weight: bold;
+  }}
+  .btn-finish:hover {{ background: #efffef; }}
+  .sep {{
+    border-left: 1px solid #808080;
+    height: 20px;
+    margin: 0 4px;
+  }}
+</style>
+</head>
+<body>
+<div class="wizard-shell">
+
+  <div class="wizard-body">
+
+    <div class="sidebar">
+      <div class="sidebar-logo" id="sidebarLogo">
+        <!-- ここに <img src="data:image/png;base64,..." alt="Strollon"> を埋め込み -->
+        Strollon
+      </div>
+      <div class="sidebar-ver">Ver. {version_name}</div>
+    </div>
+
+    <!-- コンテンツ -->
+    <div class="content-area">
+
+      <!-- スライド 0: ようこそ -->
+      <div class="slide active" id="slide0">
+        <div class="slide-heading">
+          <h1>Strollon Browser へようこそ</h1>
+        </div>
+        <p class="welcome-text">
+          このウィザードでは <b>Strollon Browser {version_name}</b> の<br>
+          新機能および変更点をご案内します。<br><br>
+          「次へ」をクリックしてください。
+        </p>
+        <div class="infobox">
+          <b>このブラウザについて</b><br>
+          Strollon は、左側に縦タブを配置したシンプルな Web ブラウザです。<br>
+          Chromium エンジン (Qt WebEngine) を採用しています。<br>
+          対応OS: Linux (Wayland) / Windows 11 以降
+        </div>
+      </div>
+
+      <!-- スライド 1: アピールポイント -->
+      <div class="slide" id="slide1">
+        <div class="slide-heading">
+          <h1>主な機能</h1>
+          <p>Strollon の特徴をご紹介します。</p>
+        </div>
+        <table class="feature-table">
+          <tr>
+            <td class="icon-col"><div class="feature-icon"></div></td>
+            <td>
+              <span class="feature-name">縦タブパネル</span>
+              <span class="feature-desc">タブを左パネルで管理。ドラッグ＆ドロップによる並び替えに対応。</span>
+            </td>
+          </tr>
+          <tr>
+            <td class="icon-col"><div class="feature-icon"></div></td>
+            <td>
+              <span class="feature-name">シークレットタブ</span>
+              <span class="feature-desc">履歴・Cookie を保存しないシークレットモードをタブ単位で利用できます。</span>
+            </td>
+          </tr>
+          <tr>
+            <td class="icon-col"><div class="feature-icon"></div></td>
+            <td>
+              <span class="feature-name">テーマ対応</span>
+              <span class="feature-desc">Default / Dark / Sakura など複数テーマを設定から即切り替えできます。</span>
+            </td>
+          </tr>
+          <tr>
+            <td class="icon-col"><div class="feature-icon"></div></td>
+            <td>
+              <span class="feature-name">Chromium エンジン</span>
+              <span class="feature-desc">Qt WebEngine (Chromium ベース) により現代的なサイトを快適に閲覧できます。</span>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- スライド 2: リリースノート -->
+      <div class="slide" id="slide2">
+        <div class="slide-heading">
+          <h1>リリースノート</h1>
+          <p>Version {version_name} の変更内容です。</p>
+        </div>
+        <div class="release-scroll">
+          <h2>0.3.0.0 Preview</h2>
+          <ul>
+            <li><span class="tag tag-new">New</span> TEST</li>
+            <li><span class="tag tag-fix">Fix</span> TEST</li>
+            <li><span class="tag tag-chg">Change</span> <code>TEST</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- スライド 3: 完了 -->
+      <div class="slide" id="slide3">
+        <div class="slide-heading">
+          <h1>準備完了</h1>
+          <p>Strollon Browser の準備が整いました。</p>
+        </div>
+        <table class="finish-table">
+          <tr><th>バージョン</th><td>{version_name}</td></tr>
+          <tr><th>インストール種別</th><td>{mode_label}</td></tr>
+          <tr><th>対応 OS</th><td>Linux (Wayland) / Windows 11+</td></tr>
+          <tr><th>開発者</th><td>ABATBeliever</td></tr>
+          <tr><th>ライセンス</th><td>GNU LGPL v3</td></tr>
+        </table>
+        <p style="font-size:12px; color:#333; line-height:1.7; margin-top:12px;">
+          「完了」をクリックするとスタートページが開きます。<br>
+          このページは strollon://welcome からいつでも再表示できます。
+        </p>
+      </div>
+
+    </div><!-- /content-area -->
+  </div><!-- /wizard-body -->
+
+  <!-- フッターナビゲーション -->
+  <div class="wizard-footer">
+    <span class="footer-steps" id="stepLabel">1 / 4</span>
+    <div class="footer-btns">
+      <button class="btn" id="btnSkip" onclick="goStart()">スキップ</button>
+      <div class="sep"></div>
+      <button class="btn" id="btnBack" onclick="go(-1)" disabled>&#8592; 戻る</button>
+      <button class="btn btn-primary" id="btnNext" onclick="go(1)">次へ &#8594;</button>
+    </div>
+  </div>
+
+</div><!-- /wizard-shell -->
+
+<script>
+  var TOTAL = 4;
+  var cur = 0;
+
+  function go(dir) {{
+    var next = cur + dir;
+    if (next < 0 || next >= TOTAL) return;
+
+    document.getElementById('slide' + cur).className = 'slide';
+    cur = next;
+    document.getElementById('slide' + cur).className = 'slide active';
+
+    updateUI();
+  }}
+
+  function updateUI() {{
+    document.getElementById('stepLabel').textContent = (cur + 1) + ' / ' + TOTAL;
+    document.getElementById('btnBack').disabled = (cur === 0);
+
+    var btnNext = document.getElementById('btnNext');
+    var btnSkip = document.getElementById('btnSkip');
+
+    if (cur === TOTAL - 1) {{
+      btnNext.textContent = '完了';
+      btnNext.className = 'btn btn-finish';
+      btnNext.onclick = goStart;
+      btnSkip.style.visibility = 'hidden';
+    }} else {{
+      btnNext.textContent = '次へ \u2192';
+      btnNext.className = 'btn btn-primary';
+      btnNext.onclick = function() {{ go(1); }};
+      btnSkip.style.visibility = 'visible';
+    }}
+  }}
+
+  function goStart() {{
+    window.location.href = 'strollon://start';
+  }}
+
+  updateUI();
+</script>
+</body>
+</html>"""
+
+
+def _build_start_html() -> str:
+    """strollon://start"""
+    return """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>新しいタブ</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f5f5f5;
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+
+        .search-container {
+            text-align: center;
+            padding: 30px;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0px 2px 5px rgba(0, 0, 0, 0);
+            display: inline-block;
+            transition: background-color 0.3s ease;
+        }
+
+        .search-input {
+            width: 90%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+
+        .search-button {
+            background-color: #007BFF;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            padding: 10px 20px;
+            margin-top: 10px;
+            cursor: pointer;
+        }
+
+        .search-button:hover {
+            background-color: #0056B3;
+        }
+
+        canvas {
+            border: 1px solid #333;
+            display: none;
+            margin: 20px auto;
+        }
+
+        #scoreDisplay {
+            font-size: 18px;
+            margin-bottom: 10px;
+            display: none;
+        }
+
+        #uploadContainer {
+            margin-bottom: 20px;
+            display: none;
+            text-align: center;
+        }
+
+        input[type="file"] {
+            margin-right: 10px;
+        }
+
+        button {
+            padding: 8px 200px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+
+        #online-status {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+        }
+
+        #gameLink {
+            position: fixed;
+            bottom: 10px;
+            left: 10px;
+            cursor: pointer;
+        }
+
+        table, th, td {
+            border: 1px #000000 solid;
+            text-align: center;
+        }
+
+    </style>
+</head>
+<body>
+    <div class="search-container">
+        <input type="text" class="search-input" placeholder="Internet Stroller Syncria">
+        <button class="search-button" onclick="search('bing')">Microsoft Bing</button>
+        <button class="search-button" onclick="search('google')">Google</button>
+        <button class="search-button" onclick="search('duckduckgo')">DuckDuckGo</button>
+    </div>
+
+    <div id="online-status"></div>
+
+<script>
+    const onlineStatusDiv = document.getElementById('online-status');
+    const searchInput = document.querySelector('.search-input');
+
+    function search(engine) {
+        const searchInput = document.querySelector('.search-input').value;
+        let url;
+
+        if (engine === 'bing') {
+            url = `https://www.bing.com/search?q=${encodeURIComponent(searchInput)}`;
+        } else if (engine === 'google') {
+            url = `https://www.google.com/search?q=${encodeURIComponent(searchInput)}`;
+        } else if (engine === 'duckduckgo') {
+            url = `https://duckduckgo.com/?q=${encodeURIComponent(searchInput)}`;
+        }
+
+        window.location.href = url;
+    }
+
+    searchInput.addEventListener("keydown", function(event) {
+        if (event.key === "Enter") {
+            search("duckduckgo");
+        }
+    });
+
+    function updateOnlineStatus() {
+        if (navigator.onLine) {
+            onlineStatusDiv.textContent = 'ONLINE';
+            onlineStatusDiv.style.color = 'green';
+        } else {
+            onlineStatusDiv.textContent = 'OFFLINE';
+            onlineStatusDiv.style.color = 'red';
+        }
+    }
+
+    updateOnlineStatus();
+    window.addEventListener('online', updateOnlineStatus);
+    window.addEventListener('offline', updateOnlineStatus);
+</script>
+
+</body>
+</html>"""
+
+
+class StrollonSchemeHandler(QWebEngineUrlSchemeHandler):
+    """
+    strollon:// 内部URLスキームのリクエストを処理するハンドラー。
+    対応URL:
+      strollon://welcome  — ようこそページ
+      strollon://start    — スタートページ
+    """
+
+    def requestStarted(self, job: QWebEngineUrlRequestJob):
+        url = job.requestUrl()
+        host = url.host().lower()
+
+        if host == "welcome":
+            html = _build_welcome_html(BROWSER_VERSION_NAME, INSTALL)
+        elif host == "start":
+            html = _build_start_html()
+        else:
+            job.fail(QWebEngineUrlRequestJob.UrlNotFound)
+            return
+
+        data = QByteArray(html.encode("utf-8"))
+        buf = QBuffer(job)
+        buf.setData(data)
+        buf.open(QBuffer.ReadOnly)
+        job.reply(b"text/html; charset=utf-8", buf)
 
 
 # =====================================================================
@@ -303,6 +949,12 @@ class VerticalTabBrowser(QMainWindow):
         self.incognito_profile.setPersistentStoragePath(str(INCOGNITO_STATE_PATH))
         self.incognito_profile.setPersistentCookiesPolicy(QWebEngineProfile.NoPersistentCookies)
 
+        # strollon:// スキームハンドラーを両プロファイルに登録
+        self._strollon_handler = StrollonSchemeHandler(self)
+        self._strollon_handler_incognito = StrollonSchemeHandler(self)
+        self.profile.installUrlSchemeHandler(b"strollon", self._strollon_handler)
+        self.incognito_profile.installUrlSchemeHandler(b"strollon", self._strollon_handler_incognito)
+
         # DNT インターセプターを両プロファイルに登録（apply_settings で有効/無効を切り替える）
         self._dnt_interceptor = DntRequestInterceptor(enabled=False, parent=self)
         self._dnt_interceptor_incognito = DntRequestInterceptor(enabled=False, parent=self)
@@ -451,12 +1103,13 @@ class VerticalTabBrowser(QMainWindow):
         main_layout.addWidget(splitter)
     
     def restore_session(self):
-        """セッションを復元。初回起動時はウェルカムページを表示する。"""
+        """セッションを復元。初回起動時・更新時はウェルカムページを表示する。"""
 
-        # 初回起動: ウェルカムページをインライン HTML で開く
-        if IS_FIRST_RUN:
-            log("[INFO] 初回起動: ウェルカムページを表示します")
-            self.add_new_tab(self._welcome_page_url(), activate=True)
+        # 初回起動 or バージョン更新: ウェルカムページを開く
+        if IS_FIRST_RUN or IS_UPDATED:
+            reason = "初回起動" if IS_FIRST_RUN else "バージョン更新"
+            log(f"[INFO] {reason}: ウェルカムページを表示します")
+            self.add_new_tab("strollon://welcome", activate=True)
             return
 
         startup_action = self.settings.value("startup_action", 0, type=int)
@@ -484,94 +1137,11 @@ class VerticalTabBrowser(QMainWindow):
                             return
 
         if startup_action == 1:
-            homepage = self.settings.value("homepage", "https://www.google.com")
+            homepage = self.settings.value("homepage", "strollon://start")
             self.add_new_tab(homepage)
         else:
-            self.add_new_tab("https://www.google.com")
+            self.add_new_tab("strollon://start")
 
-    def _welcome_page_url(self) -> str:
-        """
-        初回起動時に表示するウェルカムページを data URI として返す。
-        外部ファイル不要でブラウザ内に直接表示する。
-        """
-        mode_label = "インストール版 (XDG)" if INSTALL else "ポータブル版"
-        html = f"""<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8">
-<title>Strollon へようこそ</title>
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{
-    font-family: "Segoe UI", "Noto Sans JP", sans-serif;
-    background: #f4f6fb;
-    color: #222;
-    display: flex;
-    justify-content: center;
-    padding: 48px 16px;
-    min-height: 100vh;
-  }}
-  .card {{
-    background: #fff;
-    border-radius: 12px;
-    box-shadow: 0 2px 16px rgba(0,0,0,.10);
-    max-width: 640px;
-    width: 100%;
-    padding: 48px 48px 40px;
-  }}
-  h1 {{ font-size: 2rem; color: #1a1a2e; margin-bottom: 6px; }}
-  .version {{ color: #4a90d9; font-size: .95rem; margin-bottom: 28px; }}
-  p {{ line-height: 1.75; color: #444; margin-bottom: 14px; }}
-  hr {{ border: none; border-top: 1px solid #e8eaf0; margin: 28px 0; }}
-  .info-table {{ width: 100%; border-collapse: collapse; font-size: .88rem; }}
-  .info-table td {{ padding: 6px 8px; vertical-align: top; }}
-  .info-table td:first-child {{ color: #888; white-space: nowrap; width: 140px; }}
-  .info-table tr:nth-child(even) td {{ background: #f9fafc; border-radius: 4px; }}
-  .tip {{
-    background: #eaf2fb;
-    border-left: 4px solid #4a90d9;
-    border-radius: 4px;
-    padding: 12px 16px;
-    font-size: .88rem;
-    color: #1f5fa5;
-    margin-top: 24px;
-  }}
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>Strollon へようこそ</h1>
-  <div class="version">Version {BROWSER_VERSION_NAME}</div>
-
-  <p>
-    Strollon は、左側に縦タブを配置したシンプルなWebブラウザです。<br>
-    Chromium エンジン（Qt WebEngine）を使用しており、一般的なWebサイトを快適に閲覧できます。
-  </p>
-  <p>
-    右上の <strong>≡ メニュー</strong> から設定・ブックマーク・履歴などにアクセスできます。<br>
-    タブは左のパネルで管理でき、ドラッグ＆ドロップで並び替えも可能です。
-  </p>
-
-  <hr>
-
-  <table class="info-table">
-    <tr><td>バージョン</td><td>{BROWSER_VERSION_NAME}</td></tr>
-    <tr><td>インストール種別</td><td>{mode_label}</td></tr>
-    <tr><td>対応OS</td><td>Linux (Wayland) / Windows 11+</td></tr>
-    <tr><td>開発者</td><td>ABATBeliever</td></tr>
-    <tr><td>ライセンス</td><td>GNU LGPL v3</td></tr>
-  </table>
-
-  <div class="tip">
-    💡 このページは初回起動時のみ表示されます。次回からはホームページが開きます。
-  </div>
-</div>
-</body>
-</html>"""
-
-        from urllib.parse import quote
-        return "data:text/html;charset=utf-8," + quote(html)
-    
     def save_current_session(self):
         """現在のセッションを保存"""
         if not self.settings.value("save_session", True, type=bool):
@@ -589,8 +1159,8 @@ class VerticalTabBrowser(QMainWindow):
             if item.incognito:
                 continue
             url = item.web_view.url().toString()
-            # about: / chrome: など復元しても意味のないURLも除外
-            if not url or url.startswith("about:") or url.startswith("chrome:"):
+            # about: / chrome: / strollon: など復元しても意味のないURLも除外
+            if not url or url.startswith("about:") or url.startswith("chrome:") or url.startswith("strollon:"):
                 continue
             normal_tab_indices.append(i)
             tabs_data.append({
@@ -612,7 +1182,7 @@ class VerticalTabBrowser(QMainWindow):
         """キーボードショートカットを設定"""
         # Ctrl+T: 新しいタブ
         QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(
-            lambda: self.add_new_tab(self.settings.value("homepage", "https://www.google.com")))
+            lambda: self.add_new_tab(self.settings.value("homepage", "strollon://start")))
         # Ctrl+W: 現在のタブを閉じる
         QShortcut(QKeySequence("Ctrl+W"), self).activated.connect(self.close_current_tab)
         # Ctrl+Tab: 次のタブ（下）
@@ -769,13 +1339,13 @@ class VerticalTabBrowser(QMainWindow):
         
         # 新しいタブ
         new_tab_action = QAction(qta.icon('fa5s.plus', color=STYLES['icon_color_accent']), "新しいタブ", self)
-        new_tab_action.triggered.connect(lambda: self.add_new_tab(self.settings.value("homepage", "https://www.google.com")))
+        new_tab_action.triggered.connect(lambda: self.add_new_tab(self.settings.value("homepage", "strollon://start")))
         menu.addAction(new_tab_action)
         
         # シークレットタブ
         incognito_action = QAction(qta.icon('fa5s.user-secret', color=STYLES['icon_color_incognito']), "シークレットタブ", self)
         incognito_action.triggered.connect(lambda: self.add_new_tab(
-            self.settings.value("homepage", "https://www.google.com"), incognito=True))
+            self.settings.value("homepage", "strollon://start"), incognito=True))
         menu.addAction(incognito_action)
         
         menu.addSeparator()
@@ -1122,7 +1692,7 @@ class VerticalTabBrowser(QMainWindow):
         new_tab_btn.setToolTip("新規タブ")
         new_tab_btn.setMinimumHeight(36)
         new_tab_btn.setStyleSheet(STYLES['button_secondary'])
-        new_tab_btn.clicked.connect(lambda: self.add_new_tab(self.settings.value("homepage", "https://www.google.com")))
+        new_tab_btn.clicked.connect(lambda: self.add_new_tab(self.settings.value("homepage", "strollon://start")))
         layout.addWidget(new_tab_btn)
         
         self.tab_list = QListWidget()
@@ -1243,7 +1813,7 @@ class VerticalTabBrowser(QMainWindow):
             3: f"https://search.yahoo.co.jp/search?p={encoded_query}"
         }
         
-        return search_urls.get(search_engine, search_urls[1])  # デフォルト: Bing
+        return search_urls.get(search_engine, search_urls[2])  # デフォルト: duck
     
     def is_valid_url(self, text):
         """URL判定"""
@@ -1265,7 +1835,11 @@ class VerticalTabBrowser(QMainWindow):
     def process_url_or_search(self, text):
         """URL/検索処理"""
         text = text.strip()
-        
+
+        # 内部スキームはそのまま通す
+        if text.startswith("strollon://"):
+            return text
+
         if self.is_valid_url(text):
             if not text.startswith("http://") and not text.startswith("https://"):
                 text = "https://" + text
@@ -1346,8 +1920,8 @@ class VerticalTabBrowser(QMainWindow):
         """ページ読み込み完了時"""
         url = web_view.url().toString()
         title = web_view.title()
-        # シークレットタブは履歴に記録しない
-        if not incognito:
+        # シークレットタブ・内部URLは履歴に記録しない
+        if not incognito and not url.startswith("strollon:"):
             self.history_manager.add_history(url, title)
         self._stop_progress_bar()
     
@@ -1648,7 +2222,7 @@ class VerticalTabBrowser(QMainWindow):
             self.add_new_tab(url, activate=True)
             log(f"[INFO] TabControl: Reopen - {url}")
         else:
-            self.add_new_tab(self.settings.value("homepage", "https://www.google.com"), activate=True)
+            self.add_new_tab(self.settings.value("homepage", "strollon://start"), activate=True)
             log("[INFO] TabControl: Reopen (no history, opening homepage)")
     
     def duplicate_tab(self, item):

@@ -53,8 +53,8 @@ if _SYSTEM not in ("linux", "windows"):
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "0.2.0.0"
-BROWSER_VERSION_NAME     = "0.2.0.0"
+BROWSER_VERSION_SEMANTIC = "0.3.0.0"
+BROWSER_VERSION_NAME     = "0.3.0.0"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================
@@ -64,7 +64,7 @@ BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 # INSTALL = False → ポータブル版（実行ファイル隣のディレクトリを使用）
 # =====================================================================
 
-INSTALL: bool = True
+INSTALL: bool = False
 
 # =====================================================================
 # アーキテクチャ検出
@@ -94,7 +94,7 @@ BROWSER_TARGET_ARCHITECTURE = detect_browser_target_architecture()
 
 UPDATE_CHECK_URL = (
     f"https://abatbeliever.net/upd/Strollon/"
-    f"{BROWSER_TARGET_ARCHITECTURE}.updat"
+    f"{BROWSER_TARGET_ARCHITECTURE}"
 )
 
 # =====================================================================
@@ -192,6 +192,29 @@ def _is_first_run() -> bool:
         return not _portable_config.exists()
 
 IS_FIRST_RUN: bool = _is_first_run()
+
+
+def _check_is_updated() -> bool:
+    """
+    設定ファイルに保存されたバージョンが現在のバージョンより古い場合は更新と判断する。
+    初回起動時は False（_is_first_run が True のため welcome は別途表示）。
+    """
+    if IS_FIRST_RUN:
+        return False
+    import configparser
+    from packaging import version as _ver
+    path = _xdg_config if INSTALL_MODE == "xdg" else _portable_config
+    try:
+        cfg = configparser.ConfigParser()
+        cfg.read(str(path), encoding="utf-8")
+        stored = cfg.get("strollon", "_browser_version", fallback="")
+        if not stored:
+            return True  # バージョン記録がない旧設定 → 更新扱い
+        return _ver.parse(stored) < _ver.parse(BROWSER_VERSION_SEMANTIC)
+    except Exception:
+        return False
+
+IS_UPDATED: bool = _check_is_updated()
 
 # =====================================================================
 # ディレクトリ確定
@@ -309,7 +332,7 @@ class StrollonSettings:
     """
 
     DEFAULTS: dict = {
-        "homepage":                     "https://www.google.com",
+        "homepage":                     "strollon://start",
         "startup_action":               0,
         "save_session":                 True,
         "search_engine":                1,  # 既定: Bing
@@ -396,6 +419,8 @@ class StrollonSettings:
 
     def sync(self):
         path = self._current_path()
+        # ブラウザバージョンを設定ファイルに記録（更新検出に使用）
+        self._data["_browser_version"] = BROWSER_VERSION_SEMANTIC
         try:
             self._save_ini(path)
             log("[INFO] Settings saved")
@@ -561,10 +586,10 @@ def main():
     from PySide6.QtGui import QFont
 
     # ---- 起動ヘッダー（コンソールのみ） ----
-    print(f"\n{BROWSER_FULL_NAME}")
+    print(f"{BROWSER_FULL_NAME}")
     print("\nCopyright (C) 2025-2026 ABATBeliever")
-    print("Strollon Website     | https://abatbeliever.net/app/Strollon/")
-    print("Strollon Github Repo | https://github.com/ABATBeliever/Strollon")
+    print("Strollon WebPage           | https://abatbeliever.net/app/Strollon/")
+    print("Strollon Github Repository | https://github.com/ABATBeliever/Strollon/\n")
 
     from browser import apply_chromium_flags_from_settings
     apply_chromium_flags_from_settings()
@@ -583,9 +608,10 @@ def main():
 
     # ---- ログ出力 ----
     log(f"[INFO] OS           : {platform.system()} ({BROWSER_TARGET_ARCHITECTURE})")
-    log(f"[INFO] Install      : {'インストール版 (XDG)' if INSTALL else 'ポータブル版'}")
+    log(f"[INFO] ConfigType   : {'XDG Mode' if INSTALL else 'Portable Mode'}")
     log(f"[INFO] Mode         : {INSTALL_MODE}")
     log(f"[INFO] First Run    : {IS_FIRST_RUN}")
+    log(f"[INFO] Updated      : {IS_UPDATED}")
     log(f"[INFO] Config File  : {CONFIG_FILE}")
     log(f"[INFO] Data Dir     : {DATA_DIR}")
     log(f"[INFO] Themes Dir   : {THEMES_DIR}")
@@ -595,6 +621,9 @@ def main():
     # 初回起動時: 設定ファイルを新規作成（空の状態で sync するだけ）
     if IS_FIRST_RUN:
         log("[INFO] 初回起動: 設定ファイルを新規作成します")
+        settings.sync()
+    elif IS_UPDATED:
+        log("[INFO] バージョン更新を検出: 設定ファイルのバージョンを更新します")
         settings.sync()
 
     if not _check_data_version_conflicts():
