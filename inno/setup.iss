@@ -3,7 +3,7 @@
 ; Inno Setup is here : https://jrsoftware.org/isdl.ph
 ; Do not locate in non-ASCII Path
 #define MyAppName "Strollon WebBrowser"
-#define MyAppVersion "0.3.0.0"
+#define MyAppVersion "0.4.0.0"
 #define MyAppPublisher "ABATBeliever"
 #define MyAppURL "https://abatbeliever.net/software/bin/Strollon"
 #define MyAppExeName "Strollon.exe"

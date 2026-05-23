@@ -27,7 +27,7 @@ fi
 
 echo "[INFO] Get dependent packages..."
 uv pip install --upgrade pip
-uv pip install pyside6 qtawesome packaging nuitka
+uv pip install pyside6 qtawesome packaging nuitka adblock
 
 echo
 echo "[SUCCESS]"

@@ -6,7 +6,7 @@ Strollon Browser - ダイアログ類
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer, Slot
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit,
     QLabel, QComboBox, QFrame, QMessageBox, QTabWidget,
@@ -136,9 +136,11 @@ class AddBookmarkDialog(QDialog):
 
 class MainDialog(QDialog):
     """メインダイアログ（ブラウザについて・設定・履歴・ブックマーク・ダウンロード統合）"""
-    
+
     open_url = Signal(str)
-    
+    # 広告フィルター更新完了をバックグラウンドスレッドからメインスレッドへ届けるシグナル
+    _adblock_done_signal = Signal(bool, str)
+
     def __init__(self, history_manager, bookmark_manager, download_manager, parent=None,
                  current_url: str = "", current_title: str = ""):
         super().__init__(parent)
@@ -152,6 +154,9 @@ class MainDialog(QDialog):
 
         # 設定を遅延インポート（循環参照回避）
         self.settings = settings
+
+        # シグナルとスロットを接続（スレッドセーフなUI更新）
+        self._adblock_done_signal.connect(self._on_adblock_update_done)
 
         self.init_ui()
     
@@ -362,6 +367,36 @@ class MainDialog(QDialog):
 
         privacy_group.setLayout(privacy_layout)
         layout.addWidget(privacy_group)
+
+        # ---- 広告ブロック設定 ----
+        adblock_group = QGroupBox("広告ブロック")
+        adblock_layout = QVBoxLayout()
+
+        self.adblock_check = QCheckBox("広告ブロックを有効にする")
+        self.adblock_check.setToolTip(
+            "EasyList / EasyList Japan のフィルタールールに基づき、\n"
+            "広告・トラッキングリクエストをブロックします。\n"
+            "有効化後、「フィルターを今すぐ更新」でルールを取得してください。"
+        )
+        self.adblock_check.setChecked(self.settings.value("adblock_enabled", True, type=bool))
+        self.adblock_check.toggled.connect(lambda v: self._apply_setting("adblock_enabled", v))
+        adblock_layout.addWidget(self.adblock_check)
+
+        # ルール数・最終更新日表示 + 更新ボタン
+        adblock_info_layout = QHBoxLayout()
+        self._adblock_status_label = QLabel()
+        self._refresh_adblock_status_label()
+        adblock_info_layout.addWidget(self._adblock_status_label)
+        adblock_info_layout.addStretch()
+
+        update_filter_btn = QPushButton("フィルターを今すぐ更新")
+        update_filter_btn.setToolTip("インターネットから最新の広告フィルターリストをダウンロードします")
+        update_filter_btn.clicked.connect(self._update_adblock_filters)
+        adblock_info_layout.addWidget(update_filter_btn)
+        adblock_layout.addLayout(adblock_info_layout)
+
+        adblock_group.setLayout(adblock_layout)
+        layout.addWidget(adblock_group)
 
         # ---- ダウンロード設定 ----
         download_group = QGroupBox("ダウンロード設定")
@@ -584,6 +619,12 @@ class MainDialog(QDialog):
         else:
             self.ua_custom_input.setEnabled(True)
     
+    def showEvent(self, event):
+        """ダイアログが表示されるたびに広告ブロックのルール数を最新状態に更新する。"""
+        super().showEvent(event)
+        if hasattr(self, "_adblock_status_label"):
+            self._refresh_adblock_status_label()
+
     def _apply_setting(self, key: str, value):
         """
         リアルタイム設定反映。
@@ -601,6 +642,79 @@ class MainDialog(QDialog):
             browser.apply_settings()
 
         log(f"[INFO] Setting changed: {key} = {value}")
+
+    def _refresh_adblock_status_label(self):
+        """広告ブロックのルール数・最終更新日ラベルを更新する。"""
+        from browser import VerticalTabBrowser
+        browser = self.parent()
+        while browser and not isinstance(browser, VerticalTabBrowser):
+            browser = browser.parent()
+
+        rule_count = 0
+        blocked = 0
+        if browser and hasattr(browser, "adblock_manager"):
+            rule_count = browser.adblock_manager.rule_count()
+            blocked   = browser.adblock_manager.block_count()
+
+        last_updated = self.settings.value("adblock_last_updated", "")
+        if last_updated:
+            try:
+                import datetime
+                dt = datetime.datetime.fromisoformat(last_updated)
+                last_updated_str = dt.strftime("%Y/%m/%d %H:%M")
+            except Exception:
+                last_updated_str = last_updated
+        else:
+            last_updated_str = "未取得"
+
+        if rule_count > 0:
+            text = (f"ルール数: {rule_count:,} 件　最終更新: {last_updated_str}\n"
+                    f"ブロック実績: {blocked:,} 件")
+        else:
+            text = "フィルター未取得　（「今すぐ更新」でダウンロードしてください）"
+        self._adblock_status_label.setText(text)
+
+    def _update_adblock_filters(self):
+        """広告フィルターを非同期でダウンロード・更新する。"""
+        from browser import VerticalTabBrowser
+        browser = self.parent()
+        while browser and not isinstance(browser, VerticalTabBrowser):
+            browser = browser.parent()
+
+        if not browser or not hasattr(browser, "adblock_manager"):
+            QMessageBox.warning(self, "エラー", "ブラウザインスタンスが見つかりません。")
+            return
+
+        sender_btn = self.sender()
+        if sender_btn:
+            sender_btn.setEnabled(False)
+            sender_btn.setText("ダウンロード中...")
+
+        # バックグラウンドスレッド → メインスレッドの安全な橋渡しに
+        # Signal を使う。Signal は emit() がスレッドセーフで、
+        # Qt のイベントループ経由でメインスレッドのスロットに届く。
+        def on_done(success, message):
+            self._adblock_done_signal.emit(success, message)
+
+        # sender_btn をインスタンス変数に退避（クロージャがGCされないように）
+        self._adblock_update_btn = sender_btn
+        browser.adblock_manager.update_filters(callback=on_done)
+
+    @Slot(bool, str)
+    def _on_adblock_update_done(self, success, message):
+        """バックグラウンド完了シグナルをメインスレッドで受け取るスロット。"""
+        btn = getattr(self, "_adblock_update_btn", None)
+        if btn:
+            btn.setEnabled(True)
+            btn.setText("フィルターを今すぐ更新")
+            self._adblock_update_btn = None
+        self._refresh_adblock_status_label()
+        if success:
+            QMessageBox.information(self, "広告フィルター更新", message)
+        else:
+            QMessageBox.warning(self, "広告フィルター更新", message)
+
+
     def reset_settings_to_default(self):
         """設定を既定値に戻す（各 widget を既定値にセット → シグナル経由でリアルタイム保存）"""
         reply = QMessageBox.question(

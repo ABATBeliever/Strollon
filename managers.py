@@ -458,6 +458,246 @@ class SessionManager:
 
 
 # =====================================================================
+# 広告ブロック管理
+# =====================================================================
+
+class AdBlockManager:
+    """
+    広告ブロックマネージャー。
+
+    キャッシュ:
+      - フィルタテキスト : DATA_DIR / "adblock_filters.dat"  (ダウンロード生テキスト)
+      - シリアライズ済み : DATA_DIR / "adblock_engine.bin"   (高速ロード用)
+    """
+
+    FILTER_URLS = [
+        "https://easylist.to/easylist/easylist.txt",
+        "https://easylist.to/easylist/easyprivacy.txt",
+        "https://raw.githubusercontent.com/k2jp/abp-japanese-filters/master/abpjf.txt",
+    ]
+
+    # QWebEngineUrlRequestInfo.ResourceType → adblock resource type 文字列
+    _RESOURCE_TYPE_MAP = {
+        0:  "document",        # MainFrame
+        1:  "subdocument",     # SubFrame
+        2:  "stylesheet",      # Stylesheet
+        3:  "script",          # Script
+        4:  "image",           # Image
+        5:  "font",            # Font
+        6:  "other",           # SubResource
+        7:  "object",          # Object
+        8:  "media",           # Media
+        9:  "other",           # Worker
+        10: "other",           # SharedWorker
+        11: "xmlhttprequest",  # Xhr
+        13: "ping",            # Ping
+        14: "other",           # ServiceWorker
+        15: "csp_report",      # CspReport
+        16: "object",          # PluginResource
+        255: "other",          # Unknown
+    }
+
+    def __init__(self):
+        from constants import DATA_DIR, settings, log as _log
+        self._log = _log
+        self._settings = settings
+        self._filter_path = DATA_DIR / "adblock_filters.dat"
+        self._engine_path = DATA_DIR / "adblock_engine.bin"
+        self._engine = None
+        self._loaded = False
+        self._rule_count = 0
+        # ブロック実績カウンター（設定ファイルから復元し累積保存）
+        self._block_count: int = self._settings.value("adblock_block_count", 0, type=int)
+        self._load_engine()
+
+    # ------------------------------------------------------------------
+    # 公開 API
+    # ------------------------------------------------------------------
+
+    def is_enabled(self) -> bool:
+        return self._settings.value("adblock_enabled", True, type=bool)
+
+    def should_block(self, url: str, source_url: str = "", resource_type: int = 255) -> bool:
+        """
+        url をブロックすべきなら True を返す。
+
+        Args:
+            url:           チェックするリクエスト URL
+            source_url:    リクエスト元ページの URL（省略時は空文字）
+            resource_type: QWebEngineUrlRequestInfo.ResourceType の整数値
+        """
+        if not self.is_enabled() or not self._loaded or self._engine is None:
+            return False
+
+        # strollon:// など内部スキームは絶対にブロックしない
+        if not (url.startswith("http://") or url.startswith("https://")
+                or url.startswith("wss://") or url.startswith("ws://")):
+            return False
+
+        rtype = self._RESOURCE_TYPE_MAP.get(resource_type, "other")
+        try:
+            result = self._engine.check_network_urls(url, source_url or url, rtype)
+            if result.matched:
+                self._block_count += 1
+                self._log(f"[AdBlock] BLOCK {url[:80]} (type={rtype})")
+                # 10件ごとに永続化（頻繁なディスク書き込みを避ける）
+                if self._block_count % 10 == 0:
+                    self._settings.setValue("adblock_block_count", self._block_count)
+                    self._settings.sync()
+            return result.matched
+        except Exception as e:
+            self._log(f"[AdBlock] check error: {e}")
+            return False
+
+    def rule_count(self) -> int:
+        """エンジンにロードされた正味のルール数を返す。"""
+        return self._rule_count
+
+    def block_count(self) -> int:
+        """ブロックした実績の累計数を返す。"""
+        return self._block_count
+
+    def flush_block_count(self):
+        """現在のカウントを設定ファイルに書き込む（アプリ終了時などに呼ぶ）。"""
+        self._settings.setValue("adblock_block_count", self._block_count)
+        self._settings.sync()
+
+    def update_filters(self, callback=None):
+        """フィルターリストをバックグラウンドでダウンロード・再構築する。"""
+        import threading
+        t = threading.Thread(target=self._download_and_rebuild, args=(callback,), daemon=True)
+        t.start()
+
+    # ------------------------------------------------------------------
+    # 内部実装
+    # ------------------------------------------------------------------
+
+    def _load_engine(self):
+        """起動時: シリアライズ済みエンジンがあれば高速ロード、なければテキストから構築。"""
+        import adblock as _ab
+
+        # シリアライズ済みバイナリが存在すれば超高速ロード
+        if self._engine_path.exists():
+            try:
+                engine = _ab.Engine(_ab.FilterSet(debug=False), optimize=False)
+                engine.deserialize_from_file(str(self._engine_path))
+                self._engine = engine
+                self._loaded = True
+                # テキストファイルが残っていればルール数を復元
+                if self._filter_path.exists():
+                    try:
+                        with open(self._filter_path, "r", encoding="utf-8", errors="ignore") as _f:
+                            self._rule_count = sum(
+                                1 for l in _f
+                                if l.strip() and not l.startswith("!") and not l.startswith("[")
+                                and "##" not in l and "#@#" not in l
+                            )
+                    except Exception:
+                        pass
+                self._log(f"[INFO] AdBlock: engine loaded from cache "
+                          f"({self._rule_count:,} rules, {self._engine_path.stat().st_size:,} bytes)")
+                return
+            except Exception as e:
+                self._log(f"[WARN] AdBlock: cache load failed ({e}), rebuilding from text...")
+                # キャッシュが壊れていたら削除してテキストから再構築
+
+        # テキストファイルから構築
+        if self._filter_path.exists():
+            self._build_engine_from_text()
+        else:
+            self._log("[INFO] AdBlock: no filter file. Use 'Update Filters' to download.")
+            self._loaded = True
+
+    def _build_engine_from_text(self):
+        """adblock_filters.dat のテキストから Engine を構築してシリアライズキャッシュを作る。"""
+        import adblock as _ab
+        try:
+            with open(self._filter_path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+
+            fs = _ab.FilterSet(debug=False)
+            fs.add_filter_list(text, format="standard")
+            engine = _ab.Engine(fs, optimize=True)
+
+            # シリアライズキャッシュを保存（次回起動が速くなる）
+            self._engine_path.parent.mkdir(parents=True, exist_ok=True)
+            engine.serialize_to_file(str(self._engine_path))
+
+            # フィルタテキストから有効ルール数をカウント（コメント・空行・CSSセレクタ除外）
+            self._rule_count = sum(
+                1 for l in text.splitlines()
+                if l.strip() and not l.startswith("!") and not l.startswith("[")
+                and "##" not in l and "#@#" not in l
+            )
+            self._engine = engine
+            self._loaded = True
+            self._log(f"[INFO] AdBlock: engine built ({self._rule_count:,} rules), "
+                      f"cache saved ({self._engine_path.stat().st_size:,} bytes)")
+        except Exception as e:
+            self._log(f"[ERROR] AdBlock: engine build failed: {e}")
+            self._loaded = True
+
+    def _download_and_rebuild(self, callback):
+        """バックグラウンドスレッド: ダウンロード → テキスト保存 → Engine 再構築。"""
+        from urllib.request import urlopen, Request
+        from urllib.error import URLError
+        import datetime
+
+        all_lines = []
+        errors = []
+
+        for url in self.FILTER_URLS:
+            try:
+                self._log(f"[INFO] AdBlock: downloading {url}")
+                req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urlopen(req, timeout=20) as resp:
+                    text = resp.read().decode("utf-8", errors="ignore")
+                    all_lines.extend(text.splitlines())
+                    self._log(f"[INFO] AdBlock: fetched {url} ({len(text.splitlines())} lines)")
+            except URLError as e:
+                errors.append(f"{url}: {e.reason}")
+                self._log(f"[WARN] AdBlock: failed {url}: {e.reason}")
+            except Exception as e:
+                errors.append(str(e))
+                self._log(f"[WARN] AdBlock: error {url}: {e}")
+
+        if not all_lines and errors:
+            if callback:
+                callback(False, "ダウンロードに失敗しました:\n" + "\n".join(errors))
+            return
+
+        # テキストを保存
+        try:
+            self._filter_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._filter_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(all_lines))
+        except Exception as e:
+            if callback:
+                callback(False, f"保存に失敗しました: {e}")
+            return
+
+        # 古いキャッシュを削除して再構築
+        if self._engine_path.exists():
+            try:
+                self._engine_path.unlink()
+            except Exception:
+                pass
+
+        self._build_engine_from_text()
+
+        self._settings.setValue("adblock_last_updated", datetime.datetime.now().isoformat())
+        self._settings.sync()
+
+        line_count = len(all_lines)
+        msg = f"フィルターを更新しました（{line_count:,} 行）"
+        if errors:
+            msg += f"\n※一部取得失敗: {len(errors)} 件"
+        self._log(f"[INFO] AdBlock: {msg}")
+        if callback:
+            callback(True, msg)
+
+
+# =====================================================================
 # 更新チェック（スレッド）
 # =====================================================================
 
@@ -484,7 +724,7 @@ class UpdateChecker(QThread):
             if len(parts) < 3:
                 log(f"[INFO] UpdateCheck: invalid format (parts={len(parts)})")
                 return
-            if parts[0].strip() != "[Strollon2]":
+            if parts[0].strip() != "[Strollon]":
                 log(f"[INFO] UpdateCheck: unexpected header '{parts[0].strip()}'")
                 return
 

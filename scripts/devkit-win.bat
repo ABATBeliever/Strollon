@@ -31,7 +31,7 @@ if not exist .venv (
 
 echo [INFO] Get dependent packages...
 uv pip install --upgrade pip
-uv pip install pyside6 qtawesome packaging nuitka
+uv pip install pyside6 qtawesome packaging nuitka adblock
 if errorlevel 1 (
     echo [ERROR] Failed to install packages
     exit /b 1

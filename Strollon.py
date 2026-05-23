@@ -53,8 +53,8 @@ if _SYSTEM not in ("linux", "windows"):
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "0.3.0.0"
-BROWSER_VERSION_NAME     = "0.3.0.0"
+BROWSER_VERSION_SEMANTIC = "0.4.0.0"
+BROWSER_VERSION_NAME     = "0.4.0.0"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================
@@ -64,7 +64,7 @@ BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 # INSTALL = False → ポータブル版（実行ファイル隣のディレクトリを使用）
 # =====================================================================
 
-INSTALL: bool = False
+INSTALL: bool = True
 
 # =====================================================================
 # アーキテクチャ検出
@@ -98,7 +98,7 @@ UPDATE_CHECK_URL = (
 )
 
 # =====================================================================
-# 開発者向けフラグ
+# モードフラグ
 # =====================================================================
 
 CHECK_FOR_UPDATES: bool = True
@@ -197,22 +197,30 @@ IS_FIRST_RUN: bool = _is_first_run()
 def _check_is_updated() -> bool:
     """
     設定ファイルに保存されたバージョンが現在のバージョンより古い場合は更新と判断する。
-    初回起動時は False（_is_first_run が True のため welcome は別途表示）。
+    初回起動時は False（IS_FIRST_RUN が True のため welcome は別途表示）。
+
+    configparser で直接ファイルを読む（settings オブジェクト初期化前に呼ばれるため）。
+    キーが存在しない（旧バージョンの設定ファイル）場合は更新扱いにする。
     """
     if IS_FIRST_RUN:
         return False
     import configparser
     from packaging import version as _ver
     path = _xdg_config if INSTALL_MODE == "xdg" else _portable_config
+    if not path.exists():
+        return False  # ファイルがない = IS_FIRST_RUN が先に検出するはずだが念のため
     try:
         cfg = configparser.ConfigParser()
         cfg.read(str(path), encoding="utf-8")
+        # セクションが存在しない = 旧形式 → 更新扱い
+        if not cfg.has_section("strollon"):
+            return True
         stored = cfg.get("strollon", "_browser_version", fallback="")
         if not stored:
             return True  # バージョン記録がない旧設定 → 更新扱い
         return _ver.parse(stored) < _ver.parse(BROWSER_VERSION_SEMANTIC)
     except Exception:
-        return False
+        return False  # 読み込み失敗時は welcome を出さない（誤爆防止）
 
 IS_UPDATED: bool = _check_is_updated()
 
@@ -335,7 +343,7 @@ class StrollonSettings:
         "homepage":                     "strollon://start",
         "startup_action":               0,
         "save_session":                 True,
-        "search_engine":                1,  # 既定: Bing
+        "search_engine":                2,  # 既定: DuckDuckGo
         "clear_on_exit":                False,
         "do_not_track":                 True,
         "download_dir":                 "",
@@ -362,6 +370,9 @@ class StrollonSettings:
         "flag_no_cros_vd":   False,
         # ウィンドウ設定
         "always_on_top":     False,
+        # 広告ブロック
+        "adblock_enabled":       True,
+        "adblock_last_updated":  "",
     }
 
     def __init__(self):
@@ -618,13 +629,14 @@ def main():
     log(f"[INFO] Log File     : {LOG_FILE}")
     log(f"[INFO] Theme        : {theme_name}")
 
-    # 初回起動時: 設定ファイルを新規作成（空の状態で sync するだけ）
+    # 初回起動 / バージョン更新: 設定ファイルにバージョンを記録
+    # （restore_session より前に必ず sync して IS_UPDATED が次回 False になるよう保証する）
     if IS_FIRST_RUN:
-        log("[INFO] 初回起動: 設定ファイルを新規作成します")
+        log("[INFO] First Boot: Config init...")
         settings.sync()
     elif IS_UPDATED:
-        log("[INFO] バージョン更新を検出: 設定ファイルのバージョンを更新します")
-        settings.sync()
+        log(f"[INFO] Version Updated: → {BROWSER_VERSION_SEMANTIC}")
+        settings.sync()  # ← ここで新バージョンをファイルに書き込む（次回起動では False になる）
 
     if not _check_data_version_conflicts():
         sys.exit(0)
