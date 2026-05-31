@@ -6,7 +6,8 @@ Strollon Browser - データ管理クラス群
 import sqlite3
 import json
 import re
-from urllib.request import urlopen
+import platform as _platform
+from urllib.request import urlopen, Request
 from urllib.error import URLError
 from packaging import version
 from html import escape, unescape
@@ -517,6 +518,34 @@ class AdBlockManager:
     def is_enabled(self) -> bool:
         return self._settings.value("adblock_enabled", True, type=bool)
 
+    # ホワイトリストの既定値（設定画面から追加/削除可能）
+    _DEFAULT_ALLOWLIST: list = [
+        "www.youtube.com/youtubei/",
+        "googlevideo.com/videoplayback",
+        "i.ytimg.com/generate_204",
+    ]
+
+    def get_allowlist(self) -> list:
+        """設定からホワイトリストを読み込む。未設定なら既定値を返す。"""
+        raw = self._settings.value("adblock_allowlist", None)
+        if raw is None:
+            return list(self._DEFAULT_ALLOWLIST)
+        try:
+            import json as _json
+            parsed = _json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed if x]
+        except Exception:
+            pass
+        return list(self._DEFAULT_ALLOWLIST)
+
+    def save_allowlist(self, entries: list) -> None:
+        """ホワイトリストを設定に保存する。"""
+        import json as _json
+        self._settings.setValue("adblock_allowlist", _json.dumps(entries, ensure_ascii=False))
+        self._settings.sync()
+        self._log(f"[AdBlock] Allowlist updated ({len(entries)} entries)")
+
     def should_block(self, url: str, source_url: str = "", resource_type: int = 255) -> bool:
         """
         url をブロックすべきなら True を返す。
@@ -529,10 +558,13 @@ class AdBlockManager:
         if not self.is_enabled() or not self._loaded or self._engine is None:
             return False
 
-        # strollon:// など内部スキームは絶対にブロックしない
         if not (url.startswith("http://") or url.startswith("https://")
                 or url.startswith("wss://") or url.startswith("ws://")):
             return False
+
+        for entry in self.get_allowlist():
+            if entry and entry in url:
+                return False
 
         rtype = self._RESOURCE_TYPE_MAP.get(resource_type, "other")
         try:
@@ -540,7 +572,6 @@ class AdBlockManager:
             if result.matched:
                 self._block_count += 1
                 self._log(f"[AdBlock] BLOCK {url[:80]} (type={rtype})")
-                # 10件ごとに永続化（頻繁なディスク書き込みを避ける）
                 if self._block_count % 10 == 0:
                     self._settings.setValue("adblock_block_count", self._block_count)
                     self._settings.sync()
@@ -708,7 +739,10 @@ class UpdateChecker(QThread):
     def run(self):
         log("[INFO] UpdateCheck Start")
         try:
-            with urlopen(UPDATE_CHECK_URL, timeout=10) as response:
+            _os = _platform.system()
+            _ua = f"Strollon/{BROWSER_VERSION_SEMANTIC} ({_os};)"
+            req = Request(UPDATE_CHECK_URL, headers={"User-Agent": _ua})
+            with urlopen(req, timeout=10) as response:
                 content = response.read().decode('utf-8').strip()
                 log(f"[INFO] UpdateCheck Response: {repr(content[:80])}")
                 self.parse_update_info(content)

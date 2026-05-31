@@ -486,10 +486,15 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
           <p>Version {version_name} の変更内容です。</p>
         </div>
         <div class="release-scroll">
-          <h2>0.4.0.0 Preview</h2>
+          <h2>{version_name} Preview</h2>
           <ul>
-            <li><span class="tag tag-new">新機能</span> EasyList / EasyPrivacy / EasyList Japan に基づく広告ブロックを実装</li>
-            <li><span class="tag tag-fix">改善</span> アップデート時の更新確認のバグを修正</li>
+            <li><span class="tag tag-new">新機能</span> キーボードショートカットをさらに追加</li>
+            <li><span class="tag tag-new">新機能</span> SSL証明書を検証</li>
+            <li><span class="tag tag-new">新機能</span> 広告ブロックに除外リストを追加</li>
+            <li><span class="tag tag-fix">改善</span> 更新確認時のUserAgentを変更</li>
+            <li><span class="tag tag-fix">改善</span> 一部のパーミッション要求を明示的に拒否するように</li>
+            <li><span class="tag tag-fix">改善</span> 未処理の例外やクラッシュを記録するように</li>
+            <li><span class="tag tag-fix">改善</span> 閲覧履歴/ダウンロード履歴の表示を刷新</li>
             <li><span class="tag tag-del">削除</span> 今回は特にありません</li>
           </ul>
         </div>
@@ -504,7 +509,7 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
         <table class="finish-table">
           <tr><th>バージョン</th><td>{version_name}</td></tr>
           <tr><th>インストール種別</th><td>{mode_label}</td></tr>
-          <tr><th>対応 OS</th><td>Linux (Wayland) / Windows 11+</td></tr>
+          <tr><th>対応 OS</th><td>Windows 10+ / Linux (Wayland)</td></tr>
           <tr><th>開発者</th><td>ABATBeliever</td></tr>
           <tr><th>ライセンス</th><td>GNU LGPL v3</td></tr>
         </table>
@@ -679,7 +684,7 @@ def _build_start_html() -> str:
 </head>
 <body>
     <div class="search-container">
-        <input type="text" class="search-input" placeholder="Internet Stroller Syncria">
+        <input type="text" class="search-input" placeholder="Strollon で検索">
         <button class="search-button" onclick="search('bing')">Microsoft Bing</button>
         <button class="search-button" onclick="search('google')">Google</button>
         <button class="search-button" onclick="search('duckduckgo')">DuckDuckGo</button>
@@ -847,6 +852,50 @@ class CustomWebEnginePage(QWebEnginePage):
     def __init__(self, profile, parent=None):
         super().__init__(profile, parent)
         self._profile = profile
+        # カメラ・マイク・位置情報は常に拒否
+        self.featurePermissionRequested.connect(self._deny_permission)
+        # SSL証明書エラー
+        self.certificateError.connect(self._handle_certificate_error)
+
+    def _deny_permission(self, url, feature):
+        """カメラ・マイク・位置情報などのパーミッション要求を常に拒否する。"""
+        self.setFeaturePermission(url, feature, QWebEnginePage.PermissionDeniedByUser)
+        log(f"[INFO] Permission denied: {feature} for {url.toString()}")
+
+    def _handle_certificate_error(self, error):
+        """SSL証明書エラー処理。設定に応じて確認ダイアログを出す。"""
+        from PySide6.QtWidgets import QMessageBox as _MB
+        browser = self._find_browser()
+
+        # 設定で無効化されている場合はそのままブロック
+        if browser and not browser.settings.value("ssl_warn_dialog", True, type=bool):
+            error.rejectCertificate()
+            log(f"[WARN] SSL certificate error (auto-blocked): {error.url().toString()}")
+            return
+
+        url_str = error.url().toString()
+        log(f"[WARN] SSL certificate error: {url_str}")
+
+        msg = _MB()
+        msg.setWindowTitle("セキュリティ警告")
+        msg.setIcon(_MB.Warning)
+        msg.setText(
+            f"<b>この接続は安全でない可能性があります</b><br><br>"
+            f"<b>URL:</b> {url_str}<br><br>"
+            f"証明書エラーが発生しました。自己署名証明書や期限切れの証明書の可能性があります。<br>"
+            f"続行すると通信内容が第三者に傍受される危険があります。"
+        )
+        continue_btn = msg.addButton("続行する（危険）", _MB.AcceptRole)
+        msg.addButton("戻る（安全）", _MB.RejectRole)
+        msg.setDefaultButton(msg.buttons()[-1])
+        msg.exec()
+
+        if msg.clickedButton() == continue_btn:
+            error.acceptCertificate()
+            log(f"[WARN] SSL certificate error accepted by user: {url_str}")
+        else:
+            error.rejectCertificate()
+            log(f"[INFO] SSL certificate error rejected by user: {url_str}")
 
     def _find_browser(self):
         """親ウィジェットをたどって VerticalTabBrowser を返す"""
@@ -1108,7 +1157,7 @@ class VerticalTabBrowser(QMainWindow):
             log(f"[ERROR] Cannot create download directory: {e}")
             download_dir = _get_default_downloads_dir()
             download_dir.mkdir(parents=True, exist_ok=True)
-        
+
         if self.settings.value("ask_download", True, type=bool):
             filepath, _ = QFileDialog.getSaveFileName(
                 self,
@@ -1121,12 +1170,56 @@ class VerticalTabBrowser(QMainWindow):
                 download.setDownloadFileName(Path(filepath).name)
                 download.accept()
                 self.download_manager.add_download(download)
+                self._connect_download_notification(download)
                 self.show_download_dialog()
         else:
             download.setDownloadDirectory(str(download_dir))
             download.accept()
             self.download_manager.add_download(download)
+            self._connect_download_notification(download)
             self.show_download_dialog()
+
+    def _connect_download_notification(self, download):
+        """ダウンロード完了時に OS 通知を送る。"""
+        from PySide6.QtWebEngineCore import QWebEngineDownloadRequest as _DL
+
+        def _on_state_changed(state):
+            if state == _DL.DownloadState.DownloadCompleted:
+                fname = download.downloadFileName()
+                self._send_os_notification(
+                    "ダウンロード完了",
+                    f"{fname} のダウンロードが完了しました。"
+                )
+            elif state == _DL.DownloadState.DownloadInterrupted:
+                fname = download.downloadFileName()
+                self._send_os_notification(
+                    "ダウンロード失敗",
+                    f"{fname} のダウンロードが中断されました。"
+                )
+
+        download.stateChanged.connect(_on_state_changed)
+
+    def _send_os_notification(self, title: str, message: str):
+        """OS のネイティブ通知を送る。"""
+        import platform as _pl
+        _os = _pl.system()
+        log(f"[INFO] OS notification: {title} — {message}")
+        try:
+            if _os == "Windows":
+                from windows_toasts import Toast, WindowsToaster
+                toaster = WindowsToaster("Strollon")
+                toast = Toast()
+                toast.text_fields = [title, message]
+                toaster.show_toast(toast)
+            elif _os == "Linux":
+                import subprocess, shutil
+                if shutil.which("notify-send"):
+                    subprocess.Popen(
+                        ["notify-send", "-a", "Strollon", title, message],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+        except Exception as _e:
+            log(f"[WARN] OS notification failed: {_e}")
     
     def init_ui(self):
         """UIの初期化"""
@@ -1262,6 +1355,24 @@ class VerticalTabBrowser(QMainWindow):
         QShortcut(QKeySequence("Ctrl+-"), self).activated.connect(self.zoom_out)
         # ズームリセット: Ctrl+0
         QShortcut(QKeySequence("Ctrl+0"), self).activated.connect(self.zoom_reset)
+        # F5: 再読み込み
+        QShortcut(QKeySequence("F5"), self).activated.connect(self.reload_page)
+        # Ctrl+R: 再読み込み（F5の代替）
+        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self.reload_page)
+        # Ctrl+L: アドレスバーにフォーカス
+        QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._focus_address_bar)
+        # Alt+←: 戻る
+        QShortcut(QKeySequence("Alt+Left"), self).activated.connect(self._go_back)
+        # Alt+→: 進む
+        QShortcut(QKeySequence("Alt+Right"), self).activated.connect(self._go_forward)
+        # Ctrl+Shift+N: シークレットタブを開く
+        QShortcut(QKeySequence("Ctrl+Shift+N"), self).activated.connect(
+            lambda: self.add_new_tab(
+                self.settings.value("homepage", "strollon://start"), incognito=True))
+        # Ctrl+H: 履歴を開く
+        QShortcut(QKeySequence("Ctrl+H"), self).activated.connect(self.show_history_dialog)
+        # Ctrl+D: 現在のページをブックマークに追加
+        QShortcut(QKeySequence("Ctrl+D"), self).activated.connect(self.add_bookmark_from_current_tab)
         log("[INFO] Shortcuts registered")
     
     def _on_tabs_reordered(self, parent, start, end, dest, dest_row):
@@ -2187,6 +2298,23 @@ class VerticalTabBrowser(QMainWindow):
         current_item = self.tab_list.currentItem()
         if current_item and isinstance(current_item, TabItem):
             current_item.web_view.reload()
+
+    def _focus_address_bar(self):
+        """アドレスバーにフォーカスして全選択する。"""
+        self.url_bar.setFocus()
+        self.url_bar.selectAll()
+
+    def _go_back(self):
+        """現在のタブで「戻る」を実行する。"""
+        current_item = self.tab_list.currentItem()
+        if current_item and isinstance(current_item, TabItem):
+            current_item.web_view.back()
+
+    def _go_forward(self):
+        """現在のタブで「進む」を実行する。"""
+        current_item = self.tab_list.currentItem()
+        if current_item and isinstance(current_item, TabItem):
+            current_item.web_view.forward()
     
     def show_tab_context_menu(self, position):
         """タブの右クリックメニューを表示"""
@@ -2331,12 +2459,22 @@ class VerticalTabBrowser(QMainWindow):
     def closeEvent(self, event):
         """終了時の処理"""
         self.save_current_session()
-        
+
         if self.settings.value("clear_on_exit", False, type=bool):
             self.history_manager.clear_history()
 
         # ブロックカウントを永続化（100件未満の端数を確実に保存）
         if hasattr(self, "adblock_manager"):
             self.adblock_manager.flush_block_count()
+
+        # シークレットタブのキャッシュ・ストレージを確実に削除
+        import shutil as _shutil
+        for _incognito_path in (INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH):
+            try:
+                if _incognito_path.exists():
+                    _shutil.rmtree(_incognito_path, ignore_errors=True)
+                    log(f"[INFO] Incognito data removed: {_incognito_path}")
+            except Exception as _e:
+                log(f"[WARN] Failed to remove incognito data {_incognito_path}: {_e}")
 
         event.accept()

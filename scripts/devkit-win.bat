@@ -1,49 +1,59 @@
 @echo off
 setlocal enabledelayedexpansion
-echo Strollon Development kit for Windows
+echo ============================================
+echo  Strollon Development Kit for Windows
+echo ============================================
 echo.
 
-cd /d %~dp0\..
+cd /d "%~dp0\.."
 
+:: ── 1. uv の確認 / インストール ─────────────────────────────
 where uv >nul 2>&1
 if errorlevel 1 (
-    echo [INFO] Installing uv...
+    echo [INFO] uv not found. Installing...
     powershell -ExecutionPolicy Bypass -Command ^
         "iwr https://astral.sh/uv/install.ps1 -UseBasicParsing | iex"
     if errorlevel 1 (
-        echo [CRITICAL] Failed to install uv
+        echo [CRITICAL] Failed to install uv.
+        echo            Please install manually: https://docs.astral.sh/uv/
+        pause
         exit /b 1
     )
+    :: インストール直後はPATHが通っていないことがあるためリフレッシュ
+    set "PATH=%USERPROFILE%\.local\bin;%PATH%"
+    set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 ) else (
-    echo [INFO] uv is already installed.
+    for /f "tokens=*" %%v in ('uv --version 2^>^&1') do echo [INFO] %%v found.
 )
 
-if not exist .venv (
-    echo [INFO] Creating venv...
-    uv venv --python 3.12
-    if errorlevel 1 (
-        echo [CRITICAL] Failed to Create venv
-        exit /b 1
-    )
-) else (
-    echo [INFO] venv is ok
-)
-
-echo [INFO] Get dependent packages...
-uv pip install --upgrade pip
-uv pip install pyside6 qtawesome packaging nuitka adblock
-if errorlevel 1 (
-    echo [ERROR] Failed to install packages
+:: ── 2. pyproject.toml の確認 ────────────────────────────────
+if not exist pyproject.toml (
+    echo [CRITICAL] pyproject.toml not found.
+    echo            Please run this script from the project root.
+    pause
     exit /b 1
 )
 
+:: ── 3. uv sync で依存関係をインストール ─────────────────────
 echo.
-echo [SUCCESS] 
+echo [INFO] Syncing dependencies with uv sync...
+uv sync
+if errorlevel 1 (
+    echo [ERROR] uv sync failed.
+    pause
+    exit /b 1
+)
+
+:: ── 4. 完了メッセージ ────────────────────────────────────────
 echo.
-echo Run :
-echo uv run python Strollon.py
+echo ============================================
+echo  [SUCCESS] Environment is ready.
+echo ============================================
 echo.
-echo Build :
-echo call scripts/build.bat
+echo  Run:
+echo    uv run python Strollon.py
+echo.
+echo  Build:
+echo    call scripts\build.bat
 echo.
 cmd /k

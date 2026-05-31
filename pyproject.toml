@@ -1,0 +1,20 @@
+[project]
+name = "strollon"
+version = "0.5.0.0"
+description = "A lightweight web browser based on PySide6/QtWebEngine"
+requires-python = ">=3.12"
+dependencies = [
+    "pyside6",
+    "qtawesome",
+    "packaging",
+    "nuitka",
+    "adblock",
+    "windows-toasts",
+]
+
+[dependency-groups]
+dev = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

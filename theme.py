@@ -321,6 +321,47 @@ class ThemeEngine:
             }}
         """
 
+        # ---- 履歴・ダウンロード カードリスト ----
+        styles["history_list"] = f"""
+            QListWidget {{
+                background-color: {c('bg_surface_dim')};
+                border: none;
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 0px;
+                margin: 0px;
+                background-color: transparent;
+                border: none;
+            }}
+            QListWidget::item:selected {{
+                background-color: transparent;
+                border: none;
+            }}
+        """
+        styles["history_card"] = f"""
+            background-color: {c('bg_surface')};
+            border-bottom: 1px solid {c('border_default')};
+        """
+        styles["history_card_hover"] = f"""
+            background-color: {c('bg_hover')};
+            border-bottom: 1px solid {c('border_default')};
+        """
+        styles["history_group_header"] = f"""
+            background-color: {c('bg_surface_dim')};
+            color: {c('text_muted')};
+            font-size: 11px;
+            font-weight: 600;
+            padding: 6px 14px 4px 14px;
+            border-bottom: 1px solid {c('border_default')};
+        """
+        styles["history_title_color"]   = c('text_primary')
+        styles["history_url_color"]     = c('text_muted')
+        styles["history_time_color"]    = c('text_muted')
+        styles["history_bg_surface"]    = c('bg_surface')
+        styles["history_bg_hover"]      = c('bg_hover')
+        styles["history_border"]        = c('border_default')
+
         # ---- menu ----
         styles["menu"] = f"""
             QMenu {{
@@ -449,11 +490,12 @@ class ThemeEngine:
                 color: {c('text_primary')};
             }}
             QTableWidget::item:selected, QTreeWidget::item:selected {{
-                background-color: {c('accent_primary')};
-                color: {c('bg_surface')};
+                background-color: {c('accent_light')};
+                color: {c('accent_dark')};
             }}
             QTableWidget::item:hover, QTreeWidget::item:hover {{
-                background-color: {c('accent_light')};
+                background-color: {c('bg_hover')};
+                color: {c('text_primary')};
             }}
 
             QHeaderView::section {{

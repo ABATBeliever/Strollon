@@ -53,8 +53,8 @@ if _SYSTEM not in ("linux", "windows"):
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "0.4.0.0"
-BROWSER_VERSION_NAME     = "0.4.0.0"
+BROWSER_VERSION_SEMANTIC = "0.5.0.0"
+BROWSER_VERSION_NAME     = "0.5.0.0 Preview"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================
@@ -593,6 +593,20 @@ def _check_data_version_conflicts() -> bool:
 # =====================================================================
 
 def main():
+    import faulthandler
+    import traceback
+
+    # ---- セグメンテーションフォルト等のネイティブクラッシュをログに記録 ----
+    faulthandler.enable()
+
+    # ---- Python 未処理例外をログファイルに記録してから終了 ----
+    def _excepthook(exc_type, exc_value, exc_tb):
+        msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        log(f"[CRITICAL] Unhandled exception:\n{msg}")
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _excepthook
+
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QFont
 

@@ -1,17 +1,17 @@
 # Strollon WebBrowser - インターネットを散歩しよう
 
 ![License](https://img.shields.io/badge/license-LGPLv3-blue.svg)
-![Version](https://img.shields.io/badge/version-0.3.0.0-green.svg)
+![Version](https://img.shields.io/badge/version-0.5.0.0-green.svg)
 ![Version](https://img.shields.io/badge/Language-Python-yellow.svg)
 
 ---
 
 ## 概要
 
-Strollon は、縦タブ対応のシンプルな Web ブラウザです。
+Strollon は、縦タブ対応のシンプルな モダン Web ブラウザです。
 
-Pythonベースで、Chromium エンジンを採用する LGPL、
-過去のInternetStrollerシリーズの設計思想と、VELA Praxisの拡張性を合流させた、新しいブラウザです。
+Pythonベースで、Chromium エンジンを採用する LGPLライセンスの下で、
+過去のInternetStrollerシリーズの設計思想と、VELA Praxisの拡張性が合流。
 
 ---
 
@@ -46,7 +46,7 @@ XDGに準拠、またはポータブルもOK
 
 | OS                      | アーキテクチャ | 対応 |
 |-------------------------|---------------|------|
-| Windows 11 以降         | x64           |対応済|
+| Windows 10 以降 (11推奨)| x64           |対応済|
 | Linux                   | x64           |対応済|
 
 ---

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QCheckBox, QRadioButton, QSpinBox, QGroupBox, QScrollArea,
     QFormLayout, QFileDialog, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
-    QProgressBar
+    QProgressBar, QListWidget, QListWidgetItem
 )
 from PySide6.QtWebEngineCore import QWebEngineDownloadRequest
 
@@ -25,6 +25,152 @@ from constants import (
 )
 import theme as _theme_mod
 from browser import CHROMIUM_FLAGS
+
+
+# =====================================================================
+# 履歴・ダウンロード カードウィジェット
+# =====================================================================
+
+class _HistoryCard(QWidget):
+    """閲覧履歴の1行カードウィジェット。"""
+
+    def __init__(self, title, url, time_str,
+                 bg, bg_hover, border, title_color, url_color, time_color,
+                 parent=None):
+        super().__init__(parent)
+        self._bg       = bg
+        self._bg_hover = bg_hover
+        self._border   = border
+        self._hovered  = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setSpacing(8)
+
+        # 左: タイトル + URL の縦並び
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(2)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet(f"color: {title_color}; font-size: 13px; font-weight: 500; background: transparent;")
+        title_label.setMaximumWidth(600)
+        title_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        # 長いタイトルは省略
+        title_label.setText(title[:80] + ("…" if len(title) > 80 else ""))
+        text_layout.addWidget(title_label)
+
+        url_label = QLabel(url)
+        url_label.setStyleSheet(f"color: {url_color}; font-size: 11px; background: transparent;")
+        url_label.setText(url[:100] + ("…" if len(url) > 100 else ""))
+        url_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        text_layout.addWidget(url_label)
+
+        layout.addLayout(text_layout, stretch=1)
+
+        # 右: 時刻
+        time_label = QLabel(time_str)
+        time_label.setStyleSheet(f"color: {time_color}; font-size: 11px; background: transparent;")
+        time_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(time_label)
+
+        self._apply_bg()
+
+    def _apply_bg(self):
+        bg = self._bg_hover if self._hovered else self._bg
+        self.setStyleSheet(
+            f"background-color: {bg}; border-bottom: 1px solid {self._border};"
+        )
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self._apply_bg()
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._apply_bg()
+
+
+class _DownloadCard(QWidget):
+    """ダウンロード履歴の1行カードウィジェット。"""
+
+    def __init__(self, filename, url, path, size_text, status_text,
+                 is_live, live_pct,
+                 bg, bg_hover, border, title_color, url_color, time_color,
+                 parent=None):
+        super().__init__(parent)
+        self._bg       = bg
+        self._bg_hover = bg_hover
+        self._border   = border
+        self._hovered  = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setSpacing(10)
+
+        # 左: ファイル名 + 保存先
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(2)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+
+        fname_label = QLabel(filename)
+        fname_label.setStyleSheet(f"color: {title_color}; font-size: 13px; font-weight: 500; background: transparent;")
+        fname_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        text_layout.addWidget(fname_label)
+
+        path_label = QLabel(path if path else url)
+        path_label.setStyleSheet(f"color: {url_color}; font-size: 11px; background: transparent;")
+        disp = (path if path else url)
+        path_label.setText(disp[:100] + ("…" if len(disp) > 100 else ""))
+        path_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        text_layout.addWidget(path_label)
+        layout.addLayout(text_layout, stretch=1)
+
+        # 右: サイズ + 進捗
+        right_layout = QVBoxLayout()
+        right_layout.setSpacing(4)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        size_label = QLabel(size_text)
+        size_label.setStyleSheet(f"color: {time_color}; font-size: 11px; background: transparent;")
+        size_label.setAlignment(Qt.AlignRight)
+        right_layout.addWidget(size_label)
+
+        if is_live:
+            bar = QProgressBar()
+            bar.setValue(live_pct)
+            bar.setFixedWidth(100)
+            bar.setFixedHeight(14)
+            bar.setTextVisible(True)
+            right_layout.addWidget(bar, alignment=Qt.AlignRight)
+        else:
+            if status_text == "完了":
+                color = "#2e7d32"
+            elif status_text in ("キャンセル", "中断"):
+                color = "#c62828"
+            else:
+                color = time_color
+            status_label = QLabel(status_text)
+            status_label.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: 500; background: transparent;")
+            status_label.setAlignment(Qt.AlignRight)
+            right_layout.addWidget(status_label)
+
+        layout.addLayout(right_layout)
+        self._apply_bg()
+
+    def _apply_bg(self):
+        bg = self._bg_hover if self._hovered else self._bg
+        self.setStyleSheet(
+            f"background-color: {bg}; border-bottom: 1px solid {self._border};"
+        )
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self._apply_bg()
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._apply_bg()
 
 
 # =====================================================================
@@ -210,7 +356,7 @@ class MainDialog(QDialog):
         _te = _theme_mod.theme_engine
         _c = _te.c if _te else lambda k: ""
 
-        title_label = QLabel(f"<h1>{BROWSER_NAME} Preview</h1>")
+        title_label = QLabel(f"<h1>{BROWSER_NAME}</h1>")
         title_label.setAlignment(Qt.AlignCenter)
         widget.addWidget(title_label)
         
@@ -224,8 +370,7 @@ class MainDialog(QDialog):
         widget.addWidget(line)
         
         description = QLabel(
-            f"<p style='font-size: 11pt;'>{BROWSER_NAME}は、左側に縦タブを配置した<br>"
-            "シンプルで使いやすいWebブラウザです。</p>"
+            f"<p style='font-size: 11pt;'>{BROWSER_NAME}は、縦タブ対応のシンプルな モダン Web ブラウザです。</p>"
         )
         description.setAlignment(Qt.AlignCenter)
         widget.addWidget(description)
@@ -244,7 +389,7 @@ class MainDialog(QDialog):
         from PySide6 import __version__ as pyside_version
         from PySide6.QtCore import qVersion
         
-        mode_label = "XDG 準拠" if INSTALL_MODE == "xdg" else "ポータブル"
+        mode_label = "XDG" if INSTALL_MODE == "xdg" else "Portable"
         tech_text = f"""• Python バージョン : {sys.version.split()[0]}
 • PySide バージョン : {pyside_version}
 • Qt バージョン     : {qVersion()}
@@ -365,6 +510,17 @@ class MainDialog(QDialog):
             lambda v: self._apply_setting("do_not_track", v))
         privacy_layout.addWidget(self.do_not_track_check)
 
+        self.ssl_warn_check = QCheckBox("SSL 証明書エラー時に確認ダイアログを表示する")
+        self.ssl_warn_check.setToolTip(
+            "自己署名証明書・期限切れ証明書などのエラーが発生した際に、\n"
+            "続行するかどうかをユーザーに確認します。\n"
+            "無効にすると証明書エラーのあるサイトへのアクセスは自動的にブロックされます。"
+        )
+        self.ssl_warn_check.setChecked(self.settings.value("ssl_warn_dialog", True, type=bool))
+        self.ssl_warn_check.toggled.connect(
+            lambda v: self._apply_setting("ssl_warn_dialog", v))
+        privacy_layout.addWidget(self.ssl_warn_check)
+
         privacy_group.setLayout(privacy_layout)
         layout.addWidget(privacy_group)
 
@@ -395,10 +551,45 @@ class MainDialog(QDialog):
         adblock_info_layout.addWidget(update_filter_btn)
         adblock_layout.addLayout(adblock_info_layout)
 
+        # ---- ホワイトリスト編集 ----
+        allowlist_label = QLabel("ブロック除外リスト（URL に含まれる文字列）:")
+        allowlist_label.setToolTip(
+            "ここに登録した文字列を URL に含むリクエストは、\n"
+            "広告ブロックフィルターに一致してもブロックされません。\n"
+            "例: googlevideo.com/videoplayback"
+        )
+        adblock_layout.addWidget(allowlist_label)
+
+        self._allowlist_widget = QListWidget()
+        self._allowlist_widget.setMaximumHeight(120)
+        self._allowlist_widget.setToolTip("選択して「削除」ボタンで除外できます")
+        self._reload_allowlist_widget()
+        adblock_layout.addWidget(self._allowlist_widget)
+
+        allowlist_edit_layout = QHBoxLayout()
+        self._allowlist_input = QLineEdit()
+        self._allowlist_input.setPlaceholderText("除外する URL 文字列を入力（例: example.com/api/）")
+        self._allowlist_input.returnPressed.connect(self._allowlist_add)
+        allowlist_edit_layout.addWidget(self._allowlist_input)
+
+        allowlist_add_btn = QPushButton("追加")
+        allowlist_add_btn.setFixedWidth(60)
+        allowlist_add_btn.clicked.connect(self._allowlist_add)
+        allowlist_edit_layout.addWidget(allowlist_add_btn)
+
+        allowlist_del_btn = QPushButton("削除")
+        allowlist_del_btn.setFixedWidth(60)
+        allowlist_del_btn.clicked.connect(self._allowlist_remove)
+        allowlist_edit_layout.addWidget(allowlist_del_btn)
+
+        allowlist_reset_btn = QPushButton("既定値に戻す")
+        allowlist_reset_btn.clicked.connect(self._allowlist_reset)
+        allowlist_edit_layout.addWidget(allowlist_reset_btn)
+
+        adblock_layout.addLayout(allowlist_edit_layout)
+
         adblock_group.setLayout(adblock_layout)
         layout.addWidget(adblock_group)
-
-        # ---- ダウンロード設定 ----
         download_group = QGroupBox("ダウンロード設定")
         download_layout = QVBoxLayout()
 
@@ -524,38 +715,40 @@ class MainDialog(QDialog):
         return scroll_area
     
     def create_history_tab(self):
-        """閲覧履歴タブ"""
+        """閲覧履歴タブ（Chromium 風カードリスト）"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(10, 10, 10, 10)
-        
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
         # 検索バー
-        search_layout = QHBoxLayout()
+        search_bar = QWidget()
+        search_bar.setStyleSheet(
+            f"background-color: {STYLES.get('history_bg_surface', '#fff')};"
+            f"border-bottom: 1px solid {STYLES.get('history_border', '#ddd')};"
+        )
+        sb_layout = QHBoxLayout(search_bar)
+        sb_layout.setContentsMargins(10, 8, 10, 8)
+
         self.history_search_input = QLineEdit()
         self.history_search_input.setPlaceholderText("履歴を検索...")
         self.history_search_input.textChanged.connect(self.search_history)
-        search_layout.addWidget(self.history_search_input)
-        
+        sb_layout.addWidget(self.history_search_input)
+
         clear_history_btn = QPushButton("履歴を全削除")
         clear_history_btn.setStyleSheet(STYLES['button_secondary'])
         clear_history_btn.clicked.connect(self.clear_history)
-        search_layout.addWidget(clear_history_btn)
-        
-        layout.addLayout(search_layout)
-        
-        # 履歴テーブル
-        self.history_table = QTableWidget()
-        self.history_table.setColumnCount(4)
-        self.history_table.setHorizontalHeaderLabels(["タイトル", "URL", "訪問日時", "訪問回数"])
-        self.history_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.history_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.history_table.doubleClicked.connect(self.on_history_item_double_clicked)
-        layout.addWidget(self.history_table)
-        
+        sb_layout.addWidget(clear_history_btn)
+        layout.addWidget(search_bar)
+
+        # カードリスト
+        self.history_list = QListWidget()
+        self.history_list.setStyleSheet(STYLES.get('history_list', ''))
+        self.history_list.setSpacing(0)
+        self.history_list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        layout.addWidget(self.history_list)
+
         self.load_history()
-        
         return widget
     
     def create_bookmarks_tab(self):
@@ -642,6 +835,67 @@ class MainDialog(QDialog):
             browser.apply_settings()
 
         log(f"[INFO] Setting changed: {key} = {value}")
+
+    # ------------------------------------------------------------------
+    # ホワイトリスト (ブロック除外リスト) 操作
+    # ------------------------------------------------------------------
+
+    def _get_adblock_manager(self):
+        from browser import VerticalTabBrowser
+        browser = self.parent()
+        while browser and not isinstance(browser, VerticalTabBrowser):
+            browser = browser.parent()
+        if browser and hasattr(browser, "adblock_manager"):
+            return browser.adblock_manager
+        return None
+
+    def _reload_allowlist_widget(self):
+        self._allowlist_widget.clear()
+        mgr = self._get_adblock_manager()
+        entries = mgr.get_allowlist() if mgr else []
+        for entry in entries:
+            self._allowlist_widget.addItem(QListWidgetItem(entry))
+
+    def _allowlist_add(self):
+        text = self._allowlist_input.text().strip()
+        if not text:
+            return
+        mgr = self._get_adblock_manager()
+        if mgr is None:
+            return
+        entries = mgr.get_allowlist()
+        if text not in entries:
+            entries.append(text)
+            mgr.save_allowlist(entries)
+        self._allowlist_input.clear()
+        self._reload_allowlist_widget()
+        log(f"[INFO] AdBlock allowlist: added '{text}'")
+
+    def _allowlist_remove(self):
+        row = self._allowlist_widget.currentRow()
+        if row < 0:
+            return
+        item = self._allowlist_widget.item(row)
+        if item is None:
+            return
+        text = item.text()
+        mgr = self._get_adblock_manager()
+        if mgr is None:
+            return
+        entries = mgr.get_allowlist()
+        if text in entries:
+            entries.remove(text)
+            mgr.save_allowlist(entries)
+        self._reload_allowlist_widget()
+        log(f"[INFO] AdBlock allowlist: removed '{text}'")
+
+    def _allowlist_reset(self):
+        mgr = self._get_adblock_manager()
+        if mgr is None:
+            return
+        mgr.save_allowlist(list(mgr._DEFAULT_ALLOWLIST))
+        self._reload_allowlist_widget()
+        log("[INFO] AdBlock allowlist: reset to defaults")
 
     def _refresh_adblock_status_label(self):
         """広告ブロックのルール数・最終更新日ラベルを更新する。"""
@@ -746,27 +1000,86 @@ class MainDialog(QDialog):
     def load_history(self):
         history = self.history_manager.get_history(500)
         self.display_history(history)
-    
+
     def search_history(self, query):
         if query:
             history = self.history_manager.search_history(query)
         else:
             history = self.history_manager.get_history(500)
         self.display_history(history)
-    
+
     def display_history(self, history):
-        self.history_table.setRowCount(len(history))
-        for i, (url, title, visit_time, visit_count) in enumerate(history):
-            self.history_table.setItem(i, 0, QTableWidgetItem(title or ""))
-            self.history_table.setItem(i, 1, QTableWidgetItem(url))
-            self.history_table.setItem(i, 2, QTableWidgetItem(visit_time))
-            self.history_table.setItem(i, 3, QTableWidgetItem(str(visit_count)))
-    
+        """履歴を日付グループ分けしてカードリスト形式で表示する。"""
+        from datetime import datetime, date, timedelta, timezone
+        from PySide6.QtCore import QSize
+
+        self.history_list.clear()
+
+        today     = date.today()
+        yesterday = today - timedelta(days=1)
+        current_group = None
+
+        for url, title, visit_time, visit_count in history:
+            try:
+                # SQLite の CURRENT_TIMESTAMP は UTC で保存されるため
+                # ローカルタイムゾーンに変換して表示する
+                dt_utc = datetime.fromisoformat(visit_time).replace(tzinfo=timezone.utc)
+                dt     = dt_utc.astimezone()          # システムのローカルTZに変換
+                d      = dt.date()
+                if d == today:
+                    group_label = "今日"
+                elif d == yesterday:
+                    group_label = "昨日"
+                else:
+                    group_label = f"{d.month}月{d.day}日"
+                time_str = dt.strftime("%H:%M")
+            except Exception:
+                group_label = "日付不明"
+                time_str    = visit_time or ""
+
+            if group_label != current_group:
+                current_group = group_label
+                header_item = QListWidgetItem()
+                header_item.setData(Qt.UserRole, {"type": "header"})
+                header_item.setFlags(Qt.NoItemFlags)
+                self.history_list.addItem(header_item)
+                header_widget = QLabel(group_label)
+                header_widget.setStyleSheet(STYLES.get("history_group_header", ""))
+                self.history_list.setItemWidget(header_item, header_widget)
+                header_item.setSizeHint(QSize(0, 28))
+
+            card_item = QListWidgetItem()
+            card_item.setData(Qt.UserRole, {"type": "entry", "url": url})
+            self.history_list.addItem(card_item)
+            card = _HistoryCard(
+                title       = title or url,
+                url         = url,
+                time_str    = time_str,
+                bg          = STYLES.get("history_bg_surface", "#fff"),
+                bg_hover    = STYLES.get("history_bg_hover", "#f0f3f7"),
+                border      = STYLES.get("history_border", "#ddd"),
+                title_color = STYLES.get("history_title_color", "#2e2e2e"),
+                url_color   = STYLES.get("history_url_color", "#666"),
+                time_color  = STYLES.get("history_time_color", "#666"),
+            )
+            self.history_list.setItemWidget(card_item, card)
+            card_item.setSizeHint(QSize(0, 52))
+
+        try:
+            self.history_list.itemClicked.disconnect(self._on_history_card_clicked)
+        except (RuntimeError, TypeError):
+            pass
+        self.history_list.itemClicked.connect(self._on_history_card_clicked)
+
+    def _on_history_card_clicked(self, item):
+        data = item.data(Qt.UserRole)
+        if data and data.get("type") == "entry":
+            self.open_url.emit(data["url"])
+            self.close()
+
     def on_history_item_double_clicked(self, index):
-        row = index.row()
-        url = self.history_table.item(row, 1).text()
-        self.open_url.emit(url)
-        self.close()
+        """後方互換"""
+        pass
     
     def clear_history(self):
         reply = QMessageBox.question(
@@ -869,48 +1182,33 @@ class MainDialog(QDialog):
                 QMessageBox.warning(self, "エラー", "ブックマークのインポートに失敗しました。")
     
     def create_downloads_tab(self):
-        """ダウンロードタブ"""
+        """ダウンロードタブ（カードリスト形式）"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        info_label = QLabel("現在のダウンロードと過去のダウンロード履歴を表示します。")
-        layout.addWidget(info_label)
-
-        # テーブル（5列：ファイル名・URL・保存先・サイズ・進捗）
-        self.download_table = QTableWidget()
-        self.download_table.setColumnCount(5)
-        self.download_table.setHorizontalHeaderLabels([
-            "ファイル名", "URL", "保存先", "サイズ", "進捗"
-        ])
-        hh = self.download_table.horizontalHeader()
-        # 全列をInteractiveにして手動リサイズ可能に
-        for i in range(5):
-            hh.setSectionResizeMode(i, QHeaderView.Interactive)
-        self.download_table.setColumnWidth(0, 90)  # ファイル名
-        self.download_table.setColumnWidth(1, 160)  # URL
-        self.download_table.setColumnWidth(2, 220)  # 保存先
-        self.download_table.setColumnWidth(3, 40)   # サイズ
-        self.download_table.setColumnWidth(4, 40)   # 進捗
-        self.download_table.setSelectionBehavior(QAbstractItemView.SelectItems)  # セル単位選択
-        self.download_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.download_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        # 右クリックメニュー
-        self.download_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.download_table.customContextMenuRequested.connect(self._download_context_menu)
-        layout.addWidget(self.download_table)
-
-        button_layout = QHBoxLayout()
-        refresh_btn = QPushButton("更新")
-        refresh_btn.setStyleSheet(STYLES['button_secondary'])
-        refresh_btn.clicked.connect(self.load_downloads)
-        button_layout.addWidget(refresh_btn)
+        # ツールバー
+        toolbar = QWidget()
+        toolbar.setStyleSheet(
+            f"background-color: {STYLES.get('history_bg_surface', '#fff')};"
+            f"border-bottom: 1px solid {STYLES.get('history_border', '#ddd')};"
+        )
+        tb_layout = QHBoxLayout(toolbar)
+        tb_layout.setContentsMargins(10, 8, 10, 8)
         clear_history_btn = QPushButton("履歴をクリア")
         clear_history_btn.setStyleSheet(STYLES['button_secondary'])
         clear_history_btn.clicked.connect(self.clear_download_history)
-        button_layout.addWidget(clear_history_btn)
-        button_layout.addStretch()
-        layout.addLayout(button_layout)
+        tb_layout.addStretch()
+        tb_layout.addWidget(clear_history_btn)
+        layout.addWidget(toolbar)
+
+        # カードリスト
+        self.download_list = QListWidget()
+        self.download_list.setStyleSheet(STYLES.get('history_list', ''))
+        self.download_list.setSpacing(0)
+        self.download_list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        layout.addWidget(self.download_list)
 
         # 自動更新タイマー（0.5秒ごと）
         self._download_refresh_timer = QTimer(self)
@@ -921,51 +1219,12 @@ class MainDialog(QDialog):
         self.load_downloads()
         return widget
 
-    def _download_context_menu(self, pos):
-        """ダウンロードテーブルの右クリックメニュー（コピー）"""
-        row = self.download_table.rowAt(pos.y())
-        if row < 0:
-            return
-
-        file_item = self.download_table.item(row, 0)
-        url_item  = self.download_table.item(row, 1)
-        path_item = self.download_table.item(row, 2)
-        if not file_item:
-            return
-
-        import os
-        filename  = file_item.text() if file_item else ""
-        url_text  = url_item.text()  if url_item  else ""
-        dir_text  = path_item.text() if path_item else ""
-        full_path = os.path.join(dir_text, filename) if dir_text else filename
-
-        from PySide6.QtWidgets import QMenu as _QMenu
-        menu = _QMenu(self)
-        menu.setStyleSheet(STYLES.get('menu', ''))
-
-        copy_name_action = menu.addAction(f"ファイル名をコピー")
-        copy_url_action  = menu.addAction(f"URLをコピー")
-        copy_path_action = menu.addAction(f"絶対パスをコピー")
-
-        # URLが空の場合はグレーアウト
-        if not url_text:
-            copy_url_action.setEnabled(False)
-
-        action = menu.exec(self.download_table.viewport().mapToGlobal(pos))
-
-        from PySide6.QtWidgets import QApplication as _QApp
-        if action == copy_name_action:
-            _QApp.clipboard().setText(filename)
-        elif action == copy_url_action:
-            _QApp.clipboard().setText(url_text)
-        elif action == copy_path_action:
-            _QApp.clipboard().setText(full_path)
 
     def load_downloads(self):
-        """ダウンロードデータを読み込み（DBから一本化・進捗はメモリ側で補完）"""
+        """ダウンロードデータをカードリストに表示する。"""
         from PySide6.QtWebEngineCore import QWebEngineDownloadRequest
+        from PySide6.QtCore import QSize
 
-        # メモリ上の進行中ダウンロードをURLでインデックス化
         live_by_url = {}
         for dl in self.download_manager.get_downloads():
             live_by_url[dl.url().toString()] = dl
@@ -973,48 +1232,62 @@ class MainDialog(QDialog):
         download_history = self.download_manager.get_download_history(100)
 
         # スクロール位置を保持
-        scrollbar = self.download_table.verticalScrollBar()
+        scrollbar = self.download_list.verticalScrollBar()
         scroll_pos = scrollbar.value()
 
-        self.download_table.setRowCount(0)
+        self.download_list.clear()
 
         for filename, url, download_path, total_bytes, received_bytes, state, start_time, finish_time in download_history:
-            row = self.download_table.rowCount()
-            self.download_table.insertRow(row)
-
-            self.download_table.setItem(row, 0, QTableWidgetItem(filename))
-            self.download_table.setItem(row, 1, QTableWidgetItem(url or ""))
-            self.download_table.setItem(row, 2, QTableWidgetItem(download_path or ""))
-
-            # サイズ
-            if total_bytes and total_bytes > 0:
-                self.download_table.setItem(
-                    row, 3, QTableWidgetItem(f"{total_bytes / (1024*1024):.2f} MB"))
-            else:
-                self.download_table.setItem(row, 3, QTableWidgetItem("不明"))
-
-            # 進捗（列4）
+            # 進捗・状態テキストを計算
             live = live_by_url.get(url)
             if live and live.state().value == 1:  # DownloadInProgress
                 live_total = live.totalBytes()
                 live_recv  = live.receivedBytes()
                 pct = int(live_recv / live_total * 100) if live_total > 0 else 0
-                progress_bar = QProgressBar()
-                progress_bar.setValue(pct)
-                self.download_table.setCellWidget(row, 4, progress_bar)
+                status_text = f"{pct}%"
+                is_live = True
+                live_pct = pct
             else:
-                # DB値で表示。100% or 完了(state==2) なら「完了」テキスト
+                is_live = False
+                live_pct = 0
                 if total_bytes and total_bytes > 0:
                     pct = int((received_bytes or 0) / total_bytes * 100)
                 else:
                     pct = 100 if state == 2 else 0
-
                 if pct >= 100 or state == 2:
-                    item = QTableWidgetItem("完了")
-                    item.setForeground(__import__('PySide6.QtGui', fromlist=['QColor']).QColor('#2e7d32'))
-                    self.download_table.setItem(row, 4, item)
+                    status_text = "完了"
+                elif state == 3:
+                    status_text = "キャンセル"
+                elif state == 4:
+                    status_text = "中断"
                 else:
-                    self.download_table.setItem(row, 4, QTableWidgetItem(f"{pct}%"))
+                    status_text = f"{pct}%"
+
+            size_text = f"{total_bytes / (1024*1024):.1f} MB" if (total_bytes and total_bytes > 0) else "不明"
+
+            card_item = QListWidgetItem()
+            card_item.setData(Qt.UserRole, {
+                "filename": filename, "url": url or "", "path": download_path or ""
+            })
+            self.download_list.addItem(card_item)
+
+            card = _DownloadCard(
+                filename    = filename,
+                url         = url or "",
+                path        = download_path or "",
+                size_text   = size_text,
+                status_text = status_text,
+                is_live     = is_live,
+                live_pct    = live_pct,
+                bg          = STYLES.get("history_bg_surface", "#fff"),
+                bg_hover    = STYLES.get("history_bg_hover", "#f0f3f7"),
+                border      = STYLES.get("history_border", "#ddd"),
+                title_color = STYLES.get("history_title_color", "#2e2e2e"),
+                url_color   = STYLES.get("history_url_color", "#666"),
+                time_color  = STYLES.get("history_time_color", "#666"),
+            )
+            self.download_list.setItemWidget(card_item, card)
+            card_item.setSizeHint(QSize(0, 64))
 
         scrollbar.setValue(scroll_pos)
     
