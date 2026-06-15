@@ -80,7 +80,7 @@ class HistoryManager:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT url, title, visit_time, visit_count 
+                    SELECT id, url, title, visit_time, visit_count 
                     FROM history 
                     ORDER BY visit_time DESC 
                     LIMIT ?
@@ -95,7 +95,7 @@ class HistoryManager:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT url, title, visit_time, visit_count 
+                    SELECT id, url, title, visit_time, visit_count 
                     FROM history 
                     WHERE url LIKE ? OR title LIKE ?
                     ORDER BY visit_time DESC 
@@ -106,6 +106,17 @@ class HistoryManager:
             log(f"[ERROR] search_history failed: {e}")
             return []
     
+    def delete_history(self, history_id: int):
+        """指定IDの履歴を1件削除"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM history WHERE id = ?', (history_id,))
+                conn.commit()
+            log(f"[INFO] History entry deleted: {history_id}")
+        except sqlite3.Error as e:
+            log(f"[ERROR] delete_history failed: {e}")
+
     def clear_history(self):
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -381,7 +392,7 @@ class DownloadManager:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT filename, url, download_path, total_bytes, received_bytes, state, start_time, finish_time
+                    SELECT id, filename, url, download_path, total_bytes, received_bytes, state, start_time, finish_time
                     FROM downloads
                     ORDER BY start_time DESC
                     LIMIT ?
@@ -390,7 +401,21 @@ class DownloadManager:
         except sqlite3.Error as e:
             log(f"[ERROR] get_download_history failed: {e}")
             return []
-    
+
+    def delete_download(self, download_id: int):
+        """指定IDのダウンロード履歴を1件削除（進行中は削除しない）"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    'DELETE FROM downloads WHERE id = ? AND state NOT IN (0, 1)',
+                    (download_id,)
+                )
+                conn.commit()
+            log(f"[INFO] Download entry deleted: {download_id}")
+        except sqlite3.Error as e:
+            log(f"[ERROR] delete_download failed: {e}")
+
     def clear_download_history(self):
         """ダウンロード履歴をクリア（進行中・要求中は除外）"""
         try:
@@ -524,6 +549,33 @@ class AdBlockManager:
         "googlevideo.com/videoplayback",
         "i.ytimg.com/generate_204",
     ]
+
+    _DEFAULT_FILTER_URLS: list = [
+        "https://easylist.to/easylist/easylist.txt",
+        "https://easylist.to/easylist/easyprivacy.txt",
+        "https://raw.githubusercontent.com/k2jp/abp-japanese-filters/master/abpjf.txt",
+    ]
+
+    def get_filter_urls(self) -> list:
+        """フィルターURLリストを設定から読み込む。未設定なら既定値を返す。"""
+        raw = self._settings.value("adblock_filter_urls", None)
+        if raw is None:
+            return list(self._DEFAULT_FILTER_URLS)
+        try:
+            import json as _json
+            parsed = _json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed if x]
+        except Exception:
+            pass
+        return list(self._DEFAULT_FILTER_URLS)
+
+    def save_filter_urls(self, urls: list) -> None:
+        """フィルターURLリストを設定に保存する。"""
+        import json as _json
+        self._settings.setValue("adblock_filter_urls", _json.dumps(urls, ensure_ascii=False))
+        self._settings.sync()
+        self._log(f"[AdBlock] Filter URLs updated ({len(urls)} entries)")
 
     def get_allowlist(self) -> list:
         """設定からホワイトリストを読み込む。未設定なら既定値を返す。"""
@@ -677,7 +729,7 @@ class AdBlockManager:
         all_lines = []
         errors = []
 
-        for url in self.FILTER_URLS:
+        for url in self.get_filter_urls():
             try:
                 self._log(f"[INFO] AdBlock: downloading {url}")
                 req = Request(url, headers={"User-Agent": "Mozilla/5.0"})

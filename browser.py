@@ -56,6 +56,12 @@ def apply_chromium_flags_from_settings():
                 if token not in sys.argv:
                     sys.argv.append(token)
             applied.append(key)
+    # カスタム引数（自由記述）を追加
+    custom_args_raw = s.value("chromium_custom_args", "", type=str) or ""
+    for token in custom_args_raw.split():
+        if token and token not in sys.argv:
+            sys.argv.append(token)
+            applied.append(f"custom:{token}")
     if applied:
         log(f"[INFO] Chromium flags applied: {', '.join(applied)}")
     else:
@@ -79,7 +85,7 @@ from constants import STYLES, BROWSER_FULL_NAME, BROWSER_VERSION_SEMANTIC, DOWNL
     PROFILE_PATH, INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH, CACHE_DIR, CHECK_FOR_UPDATES, settings, log, \
     IS_FIRST_RUN, IS_UPDATED, BROWSER_VERSION_NAME, INSTALL, INSTALL_MODE
 from managers import HistoryManager, BookmarkManager, DownloadManager, SessionManager, UpdateChecker
-from dialogs import AddBookmarkDialog, MainDialog, FindDialog, SavePageDialog
+from dialogs import AddBookmarkDialog, FindDialog, SavePageDialog
 
 
 from PySide6.QtCore import QUrl, Signal
@@ -115,12 +121,7 @@ _register_strollon_scheme()
 def _build_welcome_html(version_name: str, install: bool) -> str:
     """
     strollon://welcome 用HTML。
-    「次へ/戻る」ウィザード形式、レガシー調デザイン。
-    ページ構成:
-      0: ようこそ
-      1: アピールポイント
-      2: リリースノート
-      3: 始める (strollon://start へ遷移)
+    「次へ/戻る」ウィザード形式。
     """
     mode_label = "インストール版 (XDG)" if install else "ポータブル版"
     return f"""<!DOCTYPE html>
@@ -488,14 +489,9 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
         <div class="release-scroll">
           <h2>{version_name} Preview</h2>
           <ul>
-            <li><span class="tag tag-new">新機能</span> キーボードショートカットをさらに追加</li>
-            <li><span class="tag tag-new">新機能</span> SSL証明書を検証</li>
-            <li><span class="tag tag-new">新機能</span> 広告ブロックに除外リストを追加</li>
-            <li><span class="tag tag-fix">改善</span> 更新確認時のUserAgentを変更</li>
-            <li><span class="tag tag-fix">改善</span> 一部のパーミッション要求を明示的に拒否するように</li>
-            <li><span class="tag tag-fix">改善</span> 未処理の例外やクラッシュを記録するように</li>
-            <li><span class="tag tag-fix">改善</span> 閲覧履歴/ダウンロード履歴の表示を刷新</li>
-            <li><span class="tag tag-del">削除</span> 今回は特にありません</li>
+            <li><span class="tag tag-fix">改善</span> 汎用ダイアログを廃止し、内部URLに移行</li>
+            <li><span class="tag tag-fix">改善</span> 細かい挙動のバグを修正</li>
+            <li><span class="tag tag-fix">改善</span> Linux版のバージョニングのバグを修正</li>
           </ul>
         </div>
       </div>
@@ -578,6 +574,1094 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
 </script>
 </body>
 </html>"""
+
+
+
+def _build_history_html(history_records: list) -> str:
+    """strollon://history 用HTML。id付き閲覧履歴ページ。"""
+    from datetime import datetime, date, timedelta, timezone
+    from html import escape
+
+    rows_html = ""
+    today     = date.today()
+    yesterday = today - timedelta(days=1)
+    current_group = None
+
+    # history_records: (id, url, title, visit_time, visit_count)
+    for history_id, url, title, visit_time, visit_count in history_records:
+        try:
+            dt_utc = datetime.fromisoformat(visit_time).replace(tzinfo=timezone.utc)
+            dt     = dt_utc.astimezone()
+            d      = dt.date()
+            if d == today:
+                group_label = "今日"
+            elif d == yesterday:
+                group_label = "昨日"
+            else:
+                group_label = f"{d.month}月{d.day}日"
+            time_str = dt.strftime("%H:%M")
+        except Exception:
+            group_label = "日付不明"
+            time_str    = ""
+
+        if group_label != current_group:
+            current_group = group_label
+            rows_html += f'<div class="group-header">{escape(group_label)}</div>\n'
+
+        safe_url   = escape(url)
+        safe_title = escape((title or url)[:120])
+        safe_disp  = escape(url[:100] + ("…" if len(url) > 100 else ""))
+        rows_html += f"""<div class="entry" id="h{history_id}">
+  <div class="entry-body" onclick="location.href='{safe_url}'">
+    <div class="entry-left">
+      <div class="entry-title">{safe_title}</div>
+      <div class="entry-url">{safe_disp}</div>
+    </div>
+    <div class="entry-time">{time_str}</div>
+  </div>
+  <button class="action-btn" onclick="deleteEntry('history',{history_id})" title="削除">✕</button>
+</div>\n"""
+
+    if not rows_html:
+        rows_html = '<p class="empty">閲覧履歴はありません。</p>'
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>閲覧履歴</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: "Segoe UI","Meiryo",sans-serif; font-size: 13px;
+         background: #f5f5f5; color: #222; }}
+  .toolbar {{ position: sticky; top: 0; z-index: 10;
+              background: #fff; border-bottom: 1px solid #ddd;
+              padding: 10px 16px; display: flex; align-items: center; gap: 10px; }}
+  .toolbar h1 {{ font-size: 15px; font-weight: 600; flex: 1; }}
+  .toolbar input {{ flex: 2; padding: 6px 10px; border: 1px solid #ccc;
+                    border-radius: 4px; font-size: 13px; }}
+  .toolbar button {{ padding: 6px 14px; border: 1px solid #aaa;
+                     background: #fff; border-radius: 4px; cursor: pointer; font-size: 12px; }}
+  .toolbar button:hover {{ background: #f0f0f0; }}
+  .content {{ max-width: 860px; margin: 0 auto; padding: 12px 16px; }}
+  .group-header {{ font-size: 12px; font-weight: 600; color: #666;
+                   padding: 16px 0 6px; border-bottom: 1px solid #e0e0e0; margin-bottom: 2px; }}
+  .entry {{ display: flex; align-items: stretch; background: #fff;
+            border-bottom: 1px solid #eee; border-radius: 4px; margin-bottom: 2px; overflow: hidden; }}
+  .entry-body {{ flex: 1; min-width: 0; display: flex; align-items: center; padding: 10px 12px; cursor: pointer; overflow: hidden; }}
+  .entry-body:hover {{ background: #eef3fb; }}
+  .entry-left {{ flex: 1; min-width: 0; overflow: hidden; }}
+  .entry-title {{ font-size: 13px; font-weight: 500; color: #1a0dab;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .entry-url {{ font-size: 11px; color: #666; margin-top: 2px;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .entry-time {{ font-size: 11px; color: #999; margin-left: 16px; white-space: nowrap; flex-shrink: 0; }}
+  .action-btn {{ border: none; background: transparent; color: #bbb;
+                 font-size: 12px; padding: 0 10px; cursor: pointer;
+                 flex-shrink: 0; align-self: stretch;
+                 display: flex; align-items: center; }}
+  .action-btn:hover {{ color: #c62828; background: #fff0f0; }}
+  .empty {{ color: #888; padding: 40px; text-align: center; }}
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <h1>閲覧履歴</h1>
+  <input type="text" id="searchBox" placeholder="履歴を検索..." oninput="filterEntries(this.value)">
+  <button onclick="clearAll()">すべて削除</button>
+</div>
+<div class="content" id="content">{rows_html}</div>
+<script>
+function filterEntries(q) {{
+  q = q.toLowerCase();
+  document.querySelectorAll('.entry').forEach(el => {{
+    el.style.display = (!q || el.textContent.toLowerCase().includes(q)) ? '' : 'none';
+  }});
+  document.querySelectorAll('.group-header').forEach(h => {{
+    let sib = h.nextElementSibling, vis = false;
+    while (sib && !sib.classList.contains('group-header')) {{
+      if (sib.style.display !== 'none') vis = true;
+      sib = sib.nextElementSibling;
+    }}
+    h.style.display = vis ? '' : 'none';
+  }});
+}}
+function deleteEntry(type, id) {{
+  const el = document.getElementById(type[0] + id);
+  if (el) el.style.opacity = '0.3';
+  location.href = 'strollon://' + type + '/delete?id=' + id;
+}}
+function clearAll() {{
+  if (confirm('閲覧履歴をすべて削除しますか？')) location.href = 'strollon://history/clear';
+}}
+</script>
+</body>
+</html>"""
+
+
+def _build_favorites_html(bookmark_records: list) -> str:
+    """strollon://favorites 用HTML。インポート/エクスポート/単品削除付き。"""
+    from html import escape
+
+    folders: dict = {}
+    for bm_id, title, url, folder in bookmark_records:
+        folders.setdefault(folder, []).append((bm_id, title, url))
+
+    content_html = ""
+    for folder_name, items in folders.items():
+        content_html += f'<div class="folder-header">{escape(folder_name)}</div>\n'
+        for bm_id, title, url in items:
+            safe_url   = escape(url)
+            safe_title = escape((title or url)[:120])
+            safe_disp  = escape(url[:80] + ("…" if len(url) > 80 else ""))
+            content_html += f"""<div class="entry" id="b{bm_id}">
+  <div class="entry-body" onclick="location.href='{safe_url}'">
+    <div class="entry-title">{safe_title}</div>
+    <div class="entry-url">{safe_disp}</div>
+  </div>
+  <button class="action-btn" onclick="deleteBookmark({bm_id})" title="削除">✕</button>
+</div>\n"""
+
+    if not content_html:
+        content_html = '<p class="empty">ブックマークはありません。</p>'
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>お気に入り</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: "Segoe UI","Meiryo",sans-serif; font-size: 13px;
+         background: #f5f5f5; color: #222; }}
+  .toolbar {{ position: sticky; top: 0; z-index: 10;
+              background: #fff; border-bottom: 1px solid #ddd;
+              padding: 10px 16px; display: flex; align-items: center; gap: 10px; }}
+  .toolbar h1 {{ font-size: 15px; font-weight: 600; flex: 1; }}
+  .toolbar button {{ padding: 6px 14px; border: 1px solid #aaa;
+                     background: #fff; border-radius: 4px; cursor: pointer; font-size: 12px; }}
+  .toolbar button:hover {{ background: #f0f0f0; }}
+  .toolbar input[type=text] {{ flex: 2; padding: 6px 10px; border: 1px solid #ccc;
+                               border-radius: 4px; font-size: 13px; }}
+  .content {{ max-width: 860px; margin: 0 auto; padding: 12px 16px; }}
+  .folder-header {{ font-size: 12px; font-weight: 600; color: #666;
+                    padding: 16px 0 6px; border-bottom: 1px solid #e0e0e0; margin-bottom: 2px; }}
+  .entry {{ display: flex; align-items: stretch; background: #fff;
+            border-bottom: 1px solid #eee; border-radius: 4px; margin-bottom: 2px; overflow: hidden; }}
+  .entry-body {{ flex: 1; padding: 10px 12px; cursor: pointer; min-width: 0; }}
+  .entry-body:hover {{ background: #eef3fb; }}
+  .entry-title {{ font-size: 13px; font-weight: 500; color: #1a0dab;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .entry-url {{ font-size: 11px; color: #666; margin-top: 2px;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .action-btn {{ border: none; background: transparent; color: #bbb;
+                 font-size: 12px; padding: 0 10px; cursor: pointer;
+                 flex-shrink: 0; display: flex; align-items: center; }}
+  .action-btn:hover {{ color: #c62828; background: #fff0f0; }}
+  .empty {{ color: #888; padding: 40px; text-align: center; }}
+  #importFile {{ display: none; }}
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <h1>お気に入り</h1>
+  <button onclick="document.getElementById('importFile').click()">インポート</button>
+  <button onclick="location.href='strollon://favorites/export'">エクスポート</button>
+  <input type="text" id="searchBox" placeholder="ブックマークを検索..." oninput="filterEntries(this.value)">
+  <input type="file" id="importFile" accept=".html" onchange="doImport(this)">
+</div>
+<div class="content" id="content">{content_html}</div>
+<script>
+function filterEntries(q) {{
+  q = q.toLowerCase();
+  document.querySelectorAll('.entry').forEach(el => {{
+    el.style.display = (!q || el.textContent.toLowerCase().includes(q)) ? '' : 'none';
+  }});
+  document.querySelectorAll('.folder-header').forEach(h => {{
+    let sib = h.nextElementSibling, vis = false;
+    while (sib && !sib.classList.contains('folder-header')) {{
+      if (sib.style.display !== 'none') vis = true;
+      sib = sib.nextElementSibling;
+    }}
+    h.style.display = vis ? '' : 'none';
+  }});
+}}
+function deleteBookmark(id) {{
+  if (!confirm('このブックマークを削除しますか？')) return;
+  const el = document.getElementById('b' + id);
+  if (el) el.style.opacity = '0.3';
+  location.href = 'strollon://favorites/delete?id=' + id;
+}}
+function doImport(input) {{
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {{
+    const b64 = btoa(unescape(encodeURIComponent(e.target.result)));
+    location.href = 'strollon://favorites/import?data=' + encodeURIComponent(b64);
+  }};
+  reader.readAsText(file, 'utf-8');
+}}
+</script>
+</body>
+</html>"""
+
+
+def _build_downloads_html(download_manager) -> str:
+    """strollon://downloads 用HTML。JS部分更新・中止ボタン・単品削除付き。"""
+    from html import escape
+    import os
+
+    # (id, filename, url, download_path, total_bytes, received_bytes, state, start_time, finish_time)
+    history = download_manager.get_download_history(200)
+    live_by_url = {dl.url().toString(): dl for dl in download_manager.get_downloads()}
+
+    STATE_LABELS = {0: "要求中", 1: "ダウンロード中", 2: "完了", 3: "キャンセル", 4: "中断"}
+
+    rows_html = ""
+    # JS側でupdateProgressが更新するためのURLマップも埋め込む
+    url_to_id = {}
+
+    for row in history:
+        dl_id, filename, url, download_path, total_bytes, received_bytes, state, start_time, finish_time = row
+
+        live = live_by_url.get(url) if state == 1 else None
+        live_state = (live.state().value if live and hasattr(live.state(), 'value') else (int(live.state()) if live else -1))
+        if live and live_state == 1:
+            live_total = live.totalBytes()
+            live_recv  = live.receivedBytes()
+            pct = int(live_recv / live_total * 100) if live_total > 0 else 0
+            size_text = (f"{live_recv/(1024*1024):.1f} / {live_total/(1024*1024):.1f} MB"
+                         if live_total > 0 else "計算中...")
+            # progress-bar と status は JS で更新するため data-url 属性で識別
+            status_html = (
+                f'<div class="progress-bar" id="pb{dl_id}">'
+                f'<div class="progress-fill" id="pf{dl_id}" style="width:{pct}%"></div></div>'
+                f'<span class="status-in-progress" id="ps{dl_id}">{pct}%</span>'
+            )
+            action_btn = f'<button class="action-btn cancel-btn" onclick="cancelDownload(\'{escape(url)}\')" title="中止">■ 中止</button>'
+            url_to_id[url] = dl_id
+        else:
+            label = STATE_LABELS.get(state, "不明")
+            if state == 2:
+                status_html = f'<span class="status-done" id="ps{dl_id}">{label}</span>'
+            elif state in (3, 4):
+                status_html = f'<span class="status-fail" id="ps{dl_id}">{label}</span>'
+            else:
+                status_html = f'<span class="status-other" id="ps{dl_id}">{label}</span>'
+
+            if state == 2 and download_path:
+                full_path = os.path.join(download_path, filename) if not os.path.isabs(filename) else filename
+                if not os.path.exists(full_path):
+                    size_text = "削除または移動されています"
+                elif total_bytes and total_bytes > 0:
+                    size_text = f"{total_bytes/(1024*1024):.1f} MB"
+                else:
+                    size_text = "不明"
+            elif total_bytes and total_bytes > 0:
+                size_text = f"{total_bytes/(1024*1024):.1f} MB"
+            else:
+                size_text = "不明"
+            action_btn = f'<button class="action-btn del-btn" onclick="deleteDownload({dl_id})" title="削除">✕</button>'
+
+        safe_fname = escape(filename or "")
+        path_disp  = download_path or url or ""
+        safe_path  = escape(path_disp[:100] + ("…" if len(path_disp) > 100 else ""))
+
+        rows_html += f"""<div class="entry" id="d{dl_id}">
+  <div class="entry-left">
+    <div class="entry-title">{safe_fname}</div>
+    <div class="entry-url">{safe_path}</div>
+  </div>
+  <div class="entry-right"><span class="size-text" id="sz{dl_id}">{size_text}</span>{status_html}</div>
+  {action_btn}
+</div>\n"""
+
+    if not rows_html:
+        rows_html = '<p class="empty">ダウンロード履歴はありません。</p>'
+
+    import json
+    url_map_js = json.dumps(url_to_id)
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>ダウンロード</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: "Segoe UI","Meiryo",sans-serif; font-size: 13px;
+         background: #f5f5f5; color: #222; }}
+  .toolbar {{ position: sticky; top: 0; z-index: 10;
+              background: #fff; border-bottom: 1px solid #ddd;
+              padding: 10px 16px; display: flex; align-items: center; gap: 10px; }}
+  .toolbar h1 {{ font-size: 15px; font-weight: 600; flex: 1; }}
+  .toolbar button {{ padding: 6px 14px; border: 1px solid #aaa;
+                     background: #fff; border-radius: 4px; cursor: pointer; font-size: 12px; }}
+  .toolbar button:hover {{ background: #f0f0f0; }}
+  .content {{ max-width: 860px; margin: 0 auto; padding: 12px 16px; }}
+  .entry {{ display: flex; align-items: center; padding: 0 0 0 12px;
+            background: #fff; border-bottom: 1px solid #eee;
+            border-radius: 4px; margin-bottom: 2px; gap: 8px; }}
+  .entry-left {{ flex: 1; min-width: 0; padding: 10px 0; }}
+  .entry-title {{ font-size: 13px; font-weight: 500;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .entry-url {{ font-size: 11px; color: #666; margin-top: 2px;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .entry-right {{ text-align: right; font-size: 11px; color: #888; white-space: nowrap; flex-shrink: 0; }}
+  .size-text {{ display: block; margin-bottom: 3px; }}
+  .status-done {{ color: #2e7d32; font-weight: 600; display: block; }}
+  .status-fail {{ color: #c62828; font-weight: 600; display: block; }}
+  .status-in-progress {{ color: #1565c0; font-weight: 600; display: block; }}
+  .status-other {{ color: #888; display: block; }}
+  .progress-bar {{ width: 100px; height: 6px; background: #e0e0e0;
+                   border-radius: 3px; overflow: hidden; margin: 4px 0 2px auto; }}
+  .progress-fill {{ height: 100%; background: #1565c0; border-radius: 3px; transition: width 0.4s; }}
+  /* ✕ と ■ 中止は同じ見た目 */
+  .action-btn {{ border: none; background: transparent; color: #bbb;
+                 font-size: 12px; padding: 0 10px; cursor: pointer;
+                 flex-shrink: 0; align-self: stretch;
+                 display: flex; align-items: center; }}
+  .action-btn:hover {{ color: #c62828; background: #fff0f0; }}
+  .empty {{ color: #888; padding: 40px; text-align: center; }}
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <h1>ダウンロード</h1>
+  <button onclick="clearAll()">履歴をクリア</button>
+</div>
+<div class="content" id="content">{rows_html}</div>
+<script>
+const urlToId = {url_map_js};
+
+// Python側タイマーから呼ばれる: [{{"url":..., "pct":..., "size":...}}, ...]
+function updateProgress(updates) {{
+  updates.forEach(function(u) {{
+    const id = urlToId[u.url];
+    if (id == null) return;
+    const pf = document.getElementById('pf' + id);
+    const ps = document.getElementById('ps' + id);
+    const sz = document.getElementById('sz' + id);
+    if (pf) pf.style.width = u.pct + '%';
+    if (ps) ps.textContent = u.pct + '%';
+    if (sz) sz.textContent = u.size;
+  }});
+}}
+
+function cancelDownload(url) {{
+  if (!confirm('ダウンロードを中止しますか？')) return;
+  location.href = 'strollon://downloads/cancel?url=' + encodeURIComponent(url);
+}}
+function deleteDownload(id) {{
+  const el = document.getElementById('d' + id);
+  if (el) el.style.opacity = '0.4';
+  location.href = 'strollon://downloads/delete?id=' + id;
+}}
+function clearAll() {{
+  if (confirm('完了・キャンセル・中断済みのダウンロード履歴を削除しますか？'))
+    location.href = 'strollon://downloads/clear';
+}}
+</script>
+</body>
+</html>"""
+
+
+def _build_bookmarks_export_html(bookmark_records: list) -> str:
+    """NetscapeブックマークHTML形式でエクスポート用HTMLを生成する。"""
+    from html import escape
+    from datetime import datetime
+    now_ts = int(datetime.now().timestamp())
+    items_html = ""
+    folders: dict = {}
+    for bm_id, title, url, folder in bookmark_records:
+        folders.setdefault(folder, []).append((title, url))
+    for folder_name, items in folders.items():
+        items_html += f'    <DT><H3>{escape(folder_name)}</H3>\n    <DL><p>\n'
+        for title, url in items:
+            items_html += f'        <DT><A HREF="{escape(url)}" ADD_DATE="{now_ts}">{escape(title or url)}</A>\n'
+        items_html += '    </DL><p>\n'
+    return (f'<!DOCTYPE NETSCAPE-Bookmark-file-1>\n'
+            f'<!-- This is an automatically generated file. -->\n'
+            f'<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">\n'
+            f'<TITLE>Bookmarks</TITLE>\n'
+            f'<H1>Bookmarks</H1>\n'
+            f'<DL><p>\n{items_html}</DL><p>\n'
+            f'<script>const blob=new Blob([document.documentElement.outerHTML],{{type:"text/html"}});'
+            f'const a=document.createElement("a");a.href=URL.createObjectURL(blob);'
+            f'a.download="strollon_bookmarks.html";document.body.appendChild(a);a.click();</script>')
+
+
+def _import_bookmarks_html(bookmark_manager, html_data: str):
+    """NetscapeブックマークHTMLをパースしてDBにインポートする。"""
+    import re
+    current_folder = "インポート"
+    for line in html_data.splitlines():
+        h3 = re.search(r'<H3[^>]*>([^<]+)</H3>', line, re.IGNORECASE)
+        if h3:
+            current_folder = h3.group(1).strip()
+            continue
+        a = re.search(r'<A\s+[^>]*HREF="([^"]+)"[^>]*>([^<]*)</A>', line, re.IGNORECASE)
+        if a:
+            url, title = a.group(1).strip(), a.group(2).strip()
+            if url and not url.startswith("javascript:"):
+                bookmark_manager.add_bookmark(title or url, url, current_folder)
+
+
+
+
+# ── 共通CSS（welcomeウィザードシェルと共有） ─────────────────────────────────
+_WIZARD_CSS = """
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    font-family: "Segoe UI", "Meiryo", "MS Gothic", sans-serif;
+    font-size: 13px;
+    background: #d4d0c8;
+    color: #000;
+  }
+  .wizard-shell { display: flex; flex-direction: column; height: 100vh; }
+  .wizard-body  { display: flex; flex: 1; overflow: hidden; }
+  .sidebar {
+    width: 164px; min-width: 164px;
+    background: #fff;
+    border-right: 1px solid #808080;
+    display: flex; flex-direction: column;
+    align-items: center; padding-top: 24px; gap: 0;
+  }
+  .sidebar-logo {
+    width: 80px; height: 80px;
+    border: 2px solid #808080;
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 16px;
+  }
+  .sidebar-logo img { width: 100%; height: 100%; object-fit: contain; }
+  .sidebar-ver { font-size: 10px; color: #888; margin-top: auto; padding-bottom: 12px; }
+  .nav-item {
+    width: 100%; padding: 9px 16px; cursor: pointer;
+    font-size: 12px; color: #333;
+    border-left: 3px solid transparent;
+    user-select: none;
+  }
+  .nav-item:hover { background: #e8f0f8; }
+  .nav-item.active {
+    color: #000080; border-left-color: #000080;
+    background: #dce8f0; font-weight: 700;
+  }
+  .content-area {
+    flex: 1; background: #f0f0f0; overflow-y: auto;
+    padding: 24px 28px;
+  }
+  .section { display: none; max-width: 640px; }
+  .section.active { display: block; }
+  h3 { font-size: 14px; font-weight: 700; margin-bottom: 14px;
+       border-bottom: 1px solid #808080; padding-bottom: 6px; }
+  .group {
+    background: #fff; border: 1px solid #808080;
+    box-shadow: 1px 1px 0 #fff inset;
+    padding: 14px 18px; margin-bottom: 12px;
+  }
+  .group-title { font-size: 11px; font-weight: 700; color: #444;
+                 text-transform: uppercase; letter-spacing: .4px; margin-bottom: 10px; }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+  .row label { min-width: 130px; flex-shrink: 0; font-size: 12px; }
+  .row input[type=text], .row select {
+    flex: 1; padding: 4px 6px;
+    border: 1px solid #808080; font-size: 12px;
+    background: #fff;
+  }
+  .check-row { display: flex; align-items: center; gap: 8px;
+               margin-bottom: 7px; font-size: 12px; cursor: pointer; }
+  .check-row:last-child { margin-bottom: 0; }
+  .hint { font-size: 11px; color: #666; margin-top: 8px; }
+  .warn { font-size: 11px; color: #990000; margin-bottom: 8px; font-weight: 700; }
+  .adblock-info { font-size: 12px; color: #333; margin: 6px 0; }
+  .al-list {
+    border: 1px solid #808080; max-height: 110px; overflow-y: auto;
+    margin: 6px 0; background: #fff; min-height: 28px;
+  }
+  .al-item { display: flex; align-items: center; justify-content: space-between;
+             padding: 4px 8px; border-bottom: 1px solid #ddd; font-size: 12px; }
+  .al-item:last-child { border-bottom: none; }
+  .al-del { border: none; background: none; color: #888; cursor: pointer;
+            font-size: 11px; padding: 0 2px; }
+  .al-del:hover { color: #990000; }
+  .al-add-row { display: flex; gap: 4px; margin-top: 4px; }
+  .al-add-row input { flex: 1; padding: 4px 6px; border: 1px solid #808080;
+                      font-size: 12px; }
+  .btn {
+    padding: 4px 16px; font-size: 12px;
+    border: 1px solid #808080; background: #d4d0c8; cursor: pointer;
+    box-shadow: 1px 1px 0 #fff inset, -1px -1px 0 #404040 inset;
+  }
+  .btn:active { box-shadow: -1px -1px 0 #fff inset, 1px 1px 0 #404040 inset; }
+  .btn-danger { color: #990000; }
+  .bottom-bar { display: flex; justify-content: flex-end; gap: 6px;
+                margin-top: 12px; padding-top: 10px; border-top: 1px solid #b0b0b0; }
+  /* about テーブル */
+  .about-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .about-table th { text-align: left; padding: 5px 10px 5px 0; color: #333;
+                    font-weight: normal; white-space: nowrap; width: 160px;
+                    border-bottom: 1px solid #ddd; }
+  .about-table td { padding: 5px 0; border-bottom: 1px solid #ddd; font-size: 12px; }
+  .copy { font-size: 11px; color: #666; margin-top: 14px; text-align: center; }
+"""
+
+
+def _build_about_html(browser_version_name, install_mode, config_file, data_dir, arch) -> str:
+    """strollon://about — welcomeウィザードシェル構造のブラウザ情報ページ。"""
+    import sys
+    from html import escape
+    from PySide6 import __version__ as pyside_version
+    from PySide6.QtCore import qVersion
+    mode_label = "インストール版 (XDG)" if install_mode == "xdg" else "ポータブル版"
+
+    # QtWebEngine バージョン取得
+    try:
+        from PySide6.QtWebEngineCore import qWebEngineVersion
+        webengine_ver = qWebEngineVersion()
+    except Exception:
+        webengine_ver = "不明"
+
+    # Chromium バージョン取得
+    try:
+        from PySide6.QtWebEngineCore import QWebEngineProfile
+        ua = QWebEngineProfile.defaultProfile().httpUserAgent()
+        import re as _re
+        m = _re.search(r'Chrome/([\d.]+)', ua)
+        chromium_ver = m.group(1) if m else "不明"
+    except Exception:
+        chromium_ver = "不明"
+
+    html = (
+        "<!DOCTYPE html>\n"
+        '<html lang="ja">\n'
+        '<head><meta charset="UTF-8"><title>Strollon について</title>\n'
+        "<style>" + _WIZARD_CSS + """
+  .btn {
+    padding: 4px 14px; font-size: 12px; color: #000;
+    border: 1px solid #808080; background: #d4d0c8; cursor: pointer;
+    box-shadow: 1px 1px 0 #fff inset, -1px -1px 0 #404040 inset;
+  }
+  .btn:active { box-shadow: -1px -1px 0 #fff inset, 1px 1px 0 #404040 inset; }
+  .group-title { font-size: 11px; font-weight: 700; color: #444;
+                 text-transform: uppercase; letter-spacing: .4px; margin-bottom: 8px; }
+  .bottom-bar { display: flex; justify-content: flex-end; margin-top: 12px;
+                padding-top: 10px; border-top: 1px solid #b0b0b0; }
+</style>
+</head>
+<body>
+<div class="wizard-shell">
+  <div class="wizard-body">
+    <nav class="sidebar">
+      <div class="sidebar-logo">
+        <img src="data:image/png;base64,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" alt="Strollon">
+      </div>
+      <div style="font-size:11px;color:#555;padding:0 12px 16px;text-align:center;line-height:1.6;">
+        Strollon<br>""" + escape(browser_version_name) + """
+      </div>
+      <div class="sidebar-ver">ABATBeliever</div>
+    </nav>
+    <div class="content-area">
+      <h3>このブラウザについて</h3>
+
+      <div class="group">
+        <div class="group-title">バージョン / インストール</div>
+        <table class="about-table">
+          <tr><th>バージョン</th><td>""" + escape(browser_version_name) + """</td></tr>
+          <tr><th>インストール種別</th><td>""" + escape(mode_label) + """</td></tr>
+          <tr><th>アーキテクチャ</th><td>""" + escape(arch) + """</td></tr>
+          <tr><th>開発者</th><td>ABATBeliever</td></tr>
+          <tr><th>ライセンス</th><td>GNU LGPL v3</td></tr>
+        </table>
+      </div>
+
+      <div class="group">
+        <div class="group-title">ファイルとパス</div>
+        <table class="about-table">
+          <tr><th>設定ファイル</th><td>""" + escape(str(config_file)) + """</td></tr>
+          <tr><th>データディレクトリ</th><td>""" + escape(str(data_dir)) + """</td></tr>
+        </table>
+      </div>
+
+      <div class="group">
+        <div class="group-title">対応環境</div>
+        <table class="about-table">
+          <tr><th>対応 OS</th><td>Windows 10+ / Linux (Wayland)</td></tr>
+          <tr><th>Python 要件</th><td>3.12 以上</td></tr>
+        </table>
+      </div>
+
+      <div class="group">
+        <div class="group-title">コンポーネントバージョン</div>
+        <table class="about-table">
+          <tr><th>Python</th><td>""" + escape(sys.version.split()[0]) + """</td></tr>
+          <tr><th>PySide6</th><td>""" + escape(pyside_version) + """</td></tr>
+          <tr><th>Qt</th><td>""" + escape(qVersion()) + """</td></tr>
+          <tr><th>QtWebEngine</th><td>""" + escape(webengine_ver) + """</td></tr>
+          <tr><th>Chromium</th><td>""" + escape(chromium_ver) + """</td></tr>
+        </table>
+      </div>
+
+      <div class="bottom-bar">
+        <button class="btn" onclick="location.href='strollon://settings/general'">← 設定に戻る</button>
+      </div>
+      <div class="copy" style="margin-top:8px">© 2025-2026 ABATBeliever</div>
+    </div>
+  </div>
+</div>
+</body></html>"""
+    )
+    return html
+
+
+def _build_settings_html(s, adblock_mgr, themes: list, ua_presets: list,
+                         ua_preset_names: list, chromium_flags: dict,
+                         default_dl_dir: str, active_section: str = "general") -> str:
+    """strollon://settings — ウィザードシェル構造。即時保存・URLハッシュ対応。"""
+    from html import escape
+    import json, datetime
+
+    def sv(key, default=""):
+        v = s.value(key, default)
+        return v if v is not None else default
+
+    def sb(key, default=True):
+        return s.value(key, default, type=bool)
+
+    def si(key, default=0):
+        return s.value(key, default, type=int)
+
+    # adblock 状態
+    rule_count   = adblock_mgr.rule_count()   if adblock_mgr else 0
+    block_count  = adblock_mgr.block_count()  if adblock_mgr else 0
+    allowlist    = adblock_mgr.get_allowlist()    if adblock_mgr else []
+    filter_urls  = adblock_mgr.get_filter_urls()  if adblock_mgr else []
+    last_updated = sv("adblock_last_updated", "")
+    if last_updated:
+        try:
+            last_updated_str = datetime.datetime.fromisoformat(last_updated).strftime("%Y/%m/%d %H:%M")
+        except Exception:
+            last_updated_str = last_updated
+    else:
+        last_updated_str = "未取得"
+
+    adblock_status_json = json.dumps({
+        "rule_count": rule_count,
+        "block_count": block_count,
+        "last_updated": last_updated_str,
+    })
+
+    def opts(items, selected_val):
+        return "".join(
+            f'<option value="{escape(str(v))}"{"selected" if str(v)==str(selected_val) else ""}>{escape(str(l))}</option>'
+            for v, l in items
+        )
+
+    theme_opts   = opts([(t,t) for t in (themes or ["Default"])], sv("theme","Default"))
+    engine_opts  = opts(enumerate(["Google","Bing","DuckDuckGo","Yahoo! JAPAN"]), si("search_engine",2))
+    startup_opts = opts(enumerate(["前回のセッションを復元","ホームページを開く","新しいタブを開く"]), si("startup_action",0))
+    ua_opts      = opts(enumerate(ua_preset_names), si("ua_preset",0))
+
+    flags_html = ""
+    for key, (flag_str, desc) in chromium_flags.items():
+        checked = "checked" if sb(key, False) else ""
+        flags_html += (f'<label class="check-row" title="{escape(flag_str)}">'
+                       f'<input type="checkbox" data-key="{escape(key)}" {checked}>'
+                       f'{escape(desc)}</label>\n')
+
+    allowlist_items = "".join(
+        f'<div class="al-item"><span>{escape(e)}</span>'
+        f'<button type="button" class="al-del" data-entry="{escape(e)}">✕</button></div>'
+        for e in allowlist
+    ) or '<div class="al-empty">（なし）</div>'
+
+    filter_url_items = "".join(
+        f'<div class="al-item"><span style="word-break:break-all;font-size:11px">{escape(u)}</span>'
+        f'<button type="button" class="al-del" data-fentry="{escape(u)}">✕</button></div>'
+        for u in filter_urls
+    ) or '<div class="al-empty">（なし）</div>'
+
+    init_data = json.dumps({
+        "allowlist":      allowlist,
+        "filter_urls":    filter_urls,
+        "ua_presets":     ua_presets,
+        "ua_preset_count": len(ua_preset_names),
+        "adblock_status": json.loads(adblock_status_json),
+        "default_filter_urls": getattr(adblock_mgr, '_DEFAULT_FILTER_URLS', []) if adblock_mgr else [],
+        "active_section": active_section,
+    })
+
+    def ck(key, default=True):
+        return "checked" if sb(key, default) else ""
+
+    dl_dir = sv("download_dir", "") or default_dl_dir
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="UTF-8"><title>設定</title>
+<style>
+{_WIZARD_CSS}
+  body {{ overflow: hidden; }}
+  /* ボタン — テキストは常に黒 */
+  .btn {{
+    padding: 4px 14px; font-size: 12px; color: #000;
+    border: 1px solid #808080; background: #d4d0c8; cursor: pointer;
+    box-shadow: 1px 1px 0 #fff inset, -1px -1px 0 #404040 inset;
+  }}
+  .btn:active {{ box-shadow: -1px -1px 0 #fff inset, 1px 1px 0 #404040 inset; }}
+  .btn-danger  {{ background: #f4c0c0; }}
+  .btn-primary {{ background: #c0d4f4; }}
+  .al-empty {{ padding: 6px 8px; color: #aaa; font-size: 11px; }}
+</style>
+</head>
+<body>
+<div class="wizard-shell">
+  <div class="wizard-body">
+    <nav class="sidebar">
+      <div class="sidebar-logo">
+        <img src="data:image/png;base64,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" alt="Strollon">
+      </div>
+      <div class="nav-item" data-sec="general">一般</div>
+      <div class="nav-item" data-sec="appearance">外観</div>
+      <div class="nav-item" data-sec="privacy">プライバシー</div>
+      <div class="nav-item" data-sec="adblock">広告ブロック</div>
+      <div class="nav-item" data-sec="downloads">ダウンロード</div>
+      <div class="nav-item" data-sec="useragent">UserAgent</div>
+      <div class="nav-item" data-sec="advanced">詳細設定</div>
+      <div class="nav-item" data-sec="experimental">実験的機能</div>
+      <div class="nav-item" data-sec="about" onclick="location.href='strollon://about'">このブラウザについて</div>
+      <div class="sidebar-ver">Strollon</div>
+    </nav>
+    <div class="content-area">
+
+      <div class="section" id="s-general">
+        <h3>一般</h3>
+        <div class="group">
+          <div class="group-title">スタートアップ</div>
+          <div class="row"><label>起動時の動作</label>
+            <select data-key="startup_action" data-type="int">{startup_opts}</select></div>
+          <div class="row"><label>ホームページ</label>
+            <input type="text" data-key="homepage" value="{escape(sv('homepage','https://www.google.com'))}"></div>
+          <label class="check-row"><input type="checkbox" data-key="save_session" {ck('save_session',True)}>
+            終了時にセッションを保存</label>
+        </div>
+        <div class="group">
+          <div class="group-title">検索</div>
+          <div class="row"><label>検索エンジン</label>
+            <select data-key="search_engine" data-type="int">{engine_opts}</select></div>
+        </div>
+        <div class="bottom-bar">
+          <button class="btn btn-danger" onclick="resetDefaults()">既定値に戻す</button>
+        </div>
+      </div>
+
+      <div class="section" id="s-appearance">
+        <h3>外観</h3>
+        <div class="group">
+          <div class="group-title">テーマ</div>
+          <div class="row"><label>テーマ *</label>
+            <select data-key="theme">{theme_opts}</select></div>
+          <div class="hint">* のついた項目の反映には、再起動が必要です</div>
+        </div>
+      </div>
+
+      <div class="section" id="s-privacy">
+        <h3>プライバシー</h3>
+        <div class="group">
+          <label class="check-row"><input type="checkbox" data-key="clear_on_exit" {ck('clear_on_exit',False)}>
+            終了時に履歴を削除</label>
+          <label class="check-row"><input type="checkbox" data-key="do_not_track" {ck('do_not_track',True)}>
+            Do Not Track (DNT) を送信する</label>
+          <label class="check-row"><input type="checkbox" data-key="ssl_warn_dialog" {ck('ssl_warn_dialog',True)}>
+            SSL 証明書エラー時に確認ダイアログを表示する</label>
+        </div>
+      </div>
+
+      <div class="section" id="s-adblock">
+        <h3>広告ブロック</h3>
+        <div class="group">
+          <label class="check-row"><input type="checkbox" data-key="adblock_enabled" {ck('adblock_enabled',True)}>
+            広告ブロックを有効にする</label>
+          <div class="adblock-info" id="adblock-info"></div>
+          <button class="btn btn-primary" id="adblock-update-btn" onclick="updateFilters(this)"
+                  style="margin-top:6px">フィルターを今すぐ更新</button>
+        </div>
+        <div class="group">
+          <div class="group-title">フィルター定義ファイル</div>
+          <div class="al-list" id="filter-url-list">{filter_url_items}</div>
+          <div class="al-add-row" style="margin-top:4px">
+            <input type="text" id="filter-url-input" placeholder="フィルター URL を入力..."
+                   onkeydown="if(event.key==='Enter')addFilterUrl()">
+            <button class="btn" onclick="addFilterUrl()">追加</button>
+            <button class="btn btn-danger" onclick="resetFilterUrls()">既定値に戻す</button>
+          </div>
+        </div>
+        <div class="group">
+          <div class="group-title">ブロック除外リスト</div>
+          <div class="al-list" id="al-list">{allowlist_items}</div>
+          <div class="al-add-row" style="margin-top:4px">
+            <input type="text" id="al-input" placeholder="除外する URL 文字列（例: example.com/api/）"
+                   onkeydown="if(event.key==='Enter')addAllowlist()">
+            <button class="btn" onclick="addAllowlist()">追加</button>
+            <button class="btn btn-danger" onclick="resetAllowlist()">既定値に戻す</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="section" id="s-downloads">
+        <h3>ダウンロード</h3>
+        <div class="group">
+          <div class="row"><label>保存先</label>
+            <input type="text" data-key="download_dir" id="dl-dir-input" value="{escape(dl_dir)}">
+            <button class="btn" onclick="browseDir()">参照</button>
+          </div>
+          <label class="check-row"><input type="checkbox" data-key="ask_download" {ck('ask_download',True)}>
+            ダウンロード時に保存場所を確認</label>
+        </div>
+      </div>
+
+      <div class="section" id="s-useragent">
+        <h3>UserAgent</h3>
+        <div class="group">
+          <div class="row"><label>プリセット *</label>
+            <select data-key="ua_preset" data-type="int" id="ua-preset"
+                    onchange="onUaPresetChanged(this.value)">{ua_opts}</select></div>
+          <div class="row"><label>カスタム *</label>
+            <input type="text" data-key="ua_custom" id="ua-custom"
+                   value="{escape(sv('ua_custom',''))}" placeholder="カスタムUserAgentを入力"></div>
+          <div class="hint">* のついた項目の反映には、再起動が必要です</div>
+        </div>
+      </div>
+
+      <div class="section" id="s-advanced">
+        <h3>詳細設定</h3>
+        <div class="group">
+          <label class="check-row"><input type="checkbox" data-key="enable_javascript" {ck('enable_javascript',True)}>
+            JavaScript を有効にする *</label>
+          <label class="check-row"><input type="checkbox" data-key="allow_fullscreen" {ck('allow_fullscreen',True)}>
+            全画面表示を許可 *</label>
+          <label class="check-row"><input type="checkbox" data-key="auto_load_images" {ck('auto_load_images',True)}>
+            画像を自動的に読み込む *</label>
+          <label class="check-row"><input type="checkbox" data-key="enable_hardware_acceleration" {ck('enable_hardware_acceleration',True)}>
+            ハードウェアアクセラレーションを有効にする *</label>
+          <div class="hint">* のついた項目の反映には、再起動が必要です</div>
+        </div>
+      </div>
+
+      <div class="section" id="s-experimental">
+        <h3>実験的機能</h3>
+        <div class="group">
+          <div class="warn">⚠ 予期せぬ結果を招く可能性があります</div>
+          {flags_html}
+          <div class="hint">これらの反映には再起動が必要です</div>
+        </div>
+        <div class="group">
+          <div class="group-title">カスタム Chromium 引数</div>
+          <div class="warn">⚠ 不正な引数はブラウザの起動を妨げる場合があります</div>
+          <textarea data-key="chromium_custom_args"
+                    style="width:100%;height:80px;font-family:monospace;font-size:11px;
+                           border:1px solid #808080;padding:4px;resize:vertical;
+                           background:#fff;color:#000;"
+                    placeholder="--disable-web-security --allow-file-access-from-files&#10;（スペースまたは改行区切りで複数指定可）"
+          >{escape(sv('chromium_custom_args',''))}</textarea>
+          <div class="hint">再起動が必要です。各引数はスペースまたは改行区切りで入力してください。</div>
+        </div>
+      </div>
+
+    </div><!-- .content-area -->
+  </div><!-- .wizard-body -->
+</div><!-- .wizard-shell -->
+
+<script>
+const INIT = {init_data};
+let allowlist   = INIT.allowlist.slice();
+let filterUrls  = INIT.filter_urls.slice();
+const uaPresets      = INIT.ua_presets;
+const uaPresetCount  = INIT.ua_preset_count;
+const defaultFilterUrls = INIT.default_filter_urls;
+
+// --- adblock情報の即時表示 ---
+(function() {{
+  const st = INIT.adblock_status;
+  const el = document.getElementById('adblock-info');
+  if (!el) return;
+  el.textContent = st.rule_count > 0
+    ? 'ルール数: ' + st.rule_count.toLocaleString() + ' 件 / 最終更新: ' + st.last_updated
+      + ' / ブロック実績: ' + st.block_count.toLocaleString() + ' 件'
+    : 'フィルター未取得 — 「今すぐ更新」でダウンロードしてください';
+}})();
+
+// --- セクション表示（パスベース: strollon://settings/general など） ---
+const SECTIONS = ['general','appearance','privacy','adblock','downloads',
+                  'useragent','advanced','experimental'];
+
+function showSection(id) {{
+  if (!SECTIONS.includes(id)) id = 'general';
+  document.querySelectorAll('.section').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.nav-item[data-sec]').forEach(el => el.classList.remove('active'));
+  const sec = document.getElementById('s-' + id);
+  if (sec) sec.classList.add('active');
+  const nav = document.querySelector('.nav-item[data-sec="' + id + '"]');
+  if (nav) nav.classList.add('active');
+  // パスベースURLで書き換え（# 蓄積なし）
+  history.replaceState(null, '', 'strollon://settings/' + id);
+}}
+
+document.querySelectorAll('.nav-item[data-sec]').forEach(el => {{
+  if (el.dataset.sec === 'about') return;
+  el.addEventListener('click', () => showSection(el.dataset.sec));
+}});
+
+// Python側から渡された初期セクションで表示
+showSection(INIT.active_section || 'general');
+
+// --- 即時保存 ---
+function saveSetting(key, value, type) {{
+  if (type === 'int')  value = parseInt(value);
+  if (type === 'bool') value = (value === true || value === 'true');
+  const img = new Image();
+  img.src = 'strollon://settings/save-single?key='
+    + encodeURIComponent(key) + '&val=' + encodeURIComponent(JSON.stringify(value));
+}}
+function wireAll() {{
+  document.querySelectorAll('[data-key]').forEach(el => {{
+    const key  = el.dataset.key;
+    const type = el.dataset.type || (el.type === 'checkbox' ? 'bool' : 'str');
+    if (el.type === 'checkbox') {{
+      el.addEventListener('change', () => saveSetting(key, el.checked, 'bool'));
+    }} else {{
+      el.addEventListener('change', () => saveSetting(key, el.value, type));
+    }}
+  }});
+}}
+wireAll();
+
+// --- ダウンロード保存先 ---
+function browseDir() {{ location.href = 'strollon://settings/browse-dir'; }}
+
+// --- UA プリセット ---
+function onUaPresetChanged(idx) {{
+  const custom = document.getElementById('ua-custom');
+  if (parseInt(idx) < uaPresetCount - 1) {{
+    custom.disabled = true;
+    custom.placeholder = uaPresets[parseInt(idx)] || '';
+  }} else {{
+    custom.disabled = false;
+    custom.placeholder = 'カスタムUserAgentを入力';
+  }}
+}}
+onUaPresetChanged(document.getElementById('ua-preset').value);
+
+// --- 広告フィルター更新 ---
+function updateFilters(btn) {{
+  btn.disabled = true;
+  btn.textContent = 'ダウンロード中...';
+  const img = new Image();
+  img.src = 'strollon://settings/update-adblock';
+  // Python側の完了コールバックがページをリロードするため、JSでの後処理は不要
+}}
+
+// --- フィルターURLリスト ---
+function renderFilterUrls() {{
+  const list = document.getElementById('filter-url-list');
+  if (filterUrls.length === 0) {{
+    list.innerHTML = '<div class="al-empty">（なし）</div>';
+  }} else {{
+    list.innerHTML = '';
+    filterUrls.forEach(function(u) {{
+      const div = document.createElement('div');
+      div.className = 'al-item';
+      const span = document.createElement('span');
+      span.textContent = u;
+      span.style.cssText = 'word-break:break-all;font-size:11px;flex:1;margin-right:4px';
+      const btn = document.createElement('button');
+      btn.className = 'al-del';
+      btn.textContent = '✕';
+      btn.addEventListener('click', function() {{ removeFilterUrl(u); }});
+      div.appendChild(span);
+      div.appendChild(btn);
+      list.appendChild(div);
+    }});
+  }}
+  const img = new Image();
+  img.src = 'strollon://settings/save-filter-urls?data=' + encodeURIComponent(JSON.stringify(filterUrls));
+}}
+function addFilterUrl() {{
+  const inp = document.getElementById('filter-url-input');
+  const val = inp.value.trim();
+  if (!val || filterUrls.includes(val)) return;
+  filterUrls.push(val); inp.value = '';
+  renderFilterUrls();
+}}
+function removeFilterUrl(u) {{
+  filterUrls = filterUrls.filter(x => x !== u);
+  renderFilterUrls();
+}}
+function resetFilterUrls() {{
+  if (!confirm('フィルターURLを既定値に戻しますか？')) return;
+  filterUrls = defaultFilterUrls.slice();
+  renderFilterUrls();
+}}
+document.getElementById('filter-url-list').addEventListener('click', function(ev) {{
+  const btn = ev.target.closest('.al-del[data-fentry]');
+  if (!btn) return;
+  removeFilterUrl(btn.dataset.fentry);
+}});
+
+// --- ホワイトリスト ---
+function renderAllowlist() {{
+  const list = document.getElementById('al-list');
+  if (allowlist.length === 0) {{
+    list.innerHTML = '<div class="al-empty">（なし）</div>';
+  }} else {{
+    list.innerHTML = '';
+    allowlist.forEach(function(e) {{
+      const div = document.createElement('div');
+      div.className = 'al-item';
+      const span = document.createElement('span');
+      span.textContent = e;
+      const btn = document.createElement('button');
+      btn.className = 'al-del';
+      btn.textContent = '✕';
+      btn.addEventListener('click', function() {{ removeAllowlist(e); }});
+      div.appendChild(span);
+      div.appendChild(btn);
+      list.appendChild(div);
+    }});
+  }}
+  const img = new Image();
+  img.src = 'strollon://settings/save-allowlist?data=' + encodeURIComponent(JSON.stringify(allowlist));
+}}
+function addAllowlist() {{
+  const inp = document.getElementById('al-input');
+  const val = inp.value.trim();
+  if (!val || allowlist.includes(val)) return;
+  allowlist.push(val); inp.value = '';
+  renderAllowlist();
+}}
+function removeAllowlist(entry) {{
+  allowlist = allowlist.filter(e => e !== entry);
+  renderAllowlist();
+}}
+function resetAllowlist() {{
+  if (!confirm('除外リストを既定値に戻しますか？')) return;
+  location.href = 'strollon://settings/reset-allowlist';
+}}
+document.getElementById('al-list').addEventListener('click', function(ev) {{
+  const btn = ev.target.closest('.al-del[data-entry]');
+  if (!btn) return;
+  removeAllowlist(btn.dataset.entry);
+}});
+
+// --- 全体リセット ---
+function resetDefaults() {{
+  if (confirm('全ての設定を既定値に戻しますか？'))
+    location.href = 'strollon://settings/reset';
+}}
+</script>
+</body></html>"""
 
 
 def _build_start_html() -> str:
@@ -745,19 +1829,245 @@ class StrollonSchemeHandler(QWebEngineUrlSchemeHandler):
     """
 
     def requestStarted(self, job: QWebEngineUrlRequestJob):
-        url = job.requestUrl()
+        from constants import (BROWSER_VERSION_NAME, BROWSER_TARGET_ARCHITECTURE,
+                               DATA_DIR, CONFIG_FILE, INSTALL_MODE,
+                               USER_AGENT_PRESETS, USER_AGENT_PRESET_NAMES,
+                               _get_default_downloads_dir, settings)
+        url  = job.requestUrl()
         host = url.host().lower()
+        path = url.path().lower()
+
+        # ブラウザインスタンスを取得（データ参照・クリア操作に使用）
+        browser = None
+        p = self.parent()
+        while p:
+            if isinstance(p, VerticalTabBrowser):
+                browser = p
+                break
+            p = p.parent() if hasattr(p, 'parent') else None
 
         if host == "welcome":
             html = _build_welcome_html(BROWSER_VERSION_NAME, INSTALL)
+
         elif host == "start":
             html = _build_start_html()
+
+        elif host == "history":
+            if path == "/clear" and browser:
+                browser.history_manager.clear_history()
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://history'></head></html>"
+            elif path == "/delete" and browser:
+                try:
+                    hid = int(url.query().split("id=")[1].split("&")[0])
+                    browser.history_manager.delete_history(hid)
+                except (IndexError, ValueError):
+                    pass
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://history'></head></html>"
+            elif browser:
+                records = browser.history_manager.get_history(500)
+                html = _build_history_html(records)
+            else:
+                html = _build_history_html([])
+
+        elif host == "favorites":
+            if path == "/delete" and browser:
+                try:
+                    bid = int(url.query().split("id=")[1].split("&")[0])
+                    browser.bookmark_manager.delete_bookmark(bid)
+                except (IndexError, ValueError):
+                    pass
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://favorites'></head></html>"
+            elif path == "/export" and browser:
+                html = _build_bookmarks_export_html(browser.bookmark_manager.get_bookmarks())
+            elif path == "/import" and browser:
+                try:
+                    import base64, urllib.parse as _up
+                    raw = url.query()
+                    b64 = _up.unquote(raw.split("data=")[1])
+                    html_data = base64.b64decode(b64).decode("utf-8", errors="replace")
+                    _import_bookmarks_html(browser.bookmark_manager, html_data)
+                except Exception as _e:
+                    log(f"[WARN] Bookmark import failed: {_e}")
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://favorites'></head></html>"
+            elif browser:
+                records = browser.bookmark_manager.get_bookmarks()
+                html = _build_favorites_html(records)
+            else:
+                html = _build_favorites_html([])
+
+        elif host == "downloads":
+            if path == "/clear" and browser:
+                browser.download_manager.clear_download_history()
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://downloads'></head></html>"
+            elif path == "/delete" and browser:
+                try:
+                    did = int(url.query().split("id=")[1].split("&")[0])
+                    browser.download_manager.delete_download(did)
+                except (IndexError, ValueError):
+                    pass
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://downloads'></head></html>"
+            elif path == "/cancel" and browser:
+                try:
+                    import urllib.parse as _up
+                    cancel_url = _up.unquote(url.query().split("url=")[1].split("&")[0])
+                    for dl in browser.download_manager.get_downloads():
+                        if dl.url().toString() == cancel_url:
+                            dl.cancel()
+                            break
+                except (IndexError, ValueError):
+                    pass
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://downloads'></head></html>"
+            elif browser:
+                html = _build_downloads_html(browser.download_manager)
+            else:
+                html = _build_downloads_html(type('_DM', (), {
+                    'get_download_history': lambda s, n: [],
+                    'get_downloads': lambda s: []
+                })())
+
+        elif host == "about":
+            html = _build_about_html(BROWSER_VERSION_NAME, INSTALL_MODE,
+                                     CONFIG_FILE, DATA_DIR, BROWSER_TARGET_ARCHITECTURE)
+
+        elif host == "settings":
+            import json as _json, urllib.parse as _up
+
+            adblock_mgr = getattr(browser, 'adblock_manager', None) if browser else None
+            _te = None
+            try:
+                import theme as _theme_mod
+                _te = _theme_mod.theme_engine
+            except Exception:
+                pass
+            themes = _te.list_themes() if _te else ["Default"]
+
+            if path == "/save" and browser:
+                try:
+                    qs = url.query()
+                    data_enc = _up.unquote(qs.split("data=")[1])
+                    data = _json.loads(data_enc)
+                    for key, val in data.items():
+                        if key == "_allowlist":
+                            if adblock_mgr:
+                                adblock_mgr.save_allowlist(val)
+                        else:
+                            settings.setValue(key, val)
+                    settings.sync()
+                    browser.apply_settings()
+                    log(f"[INFO] Settings saved: section={qs.split('section=')[1].split('&')[0]}")
+                except Exception as _e:
+                    log(f"[WARN] Settings save failed: {_e}")
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
+
+            elif path == "/save-single" and browser:
+                # 即時保存（ページ遷移なし）
+                try:
+                    qs = url.query()
+                    key = _up.unquote(qs.split("key=")[1].split("&")[0])
+                    val_raw = _up.unquote(qs.split("val=")[1])
+                    val = _json.loads(val_raw)
+                    settings.setValue(key, val)
+                    settings.sync()
+                    browser.apply_settings()
+                    log(f"[INFO] Setting saved: {key} = {val}")
+                except Exception as _e:
+                    log(f"[WARN] save-single failed: {_e}")
+                html = "<html><body></body></html>"
+
+            elif path == "/save-allowlist" and adblock_mgr:
+                try:
+                    qs = url.query()
+                    data_enc = _up.unquote(qs.split("data=")[1])
+                    new_list = _json.loads(data_enc)
+                    adblock_mgr.save_allowlist(new_list)
+                    log(f"[INFO] Allowlist saved: {len(new_list)} entries")
+                except Exception as _e:
+                    log(f"[WARN] save-allowlist failed: {_e}")
+                html = "<html><body></body></html>"
+
+            elif path == "/save-filter-urls" and adblock_mgr:
+                try:
+                    qs = url.query()
+                    data_enc = _up.unquote(qs.split("data=")[1])
+                    new_urls = _json.loads(data_enc)
+                    adblock_mgr.save_filter_urls(new_urls)
+                    log(f"[INFO] Filter URLs saved: {len(new_urls)} entries")
+                except Exception as _e:
+                    log(f"[WARN] save-filter-urls failed: {_e}")
+                html = "<html><body></body></html>"
+
+            elif path == "/reset-filter-urls" and adblock_mgr:
+                adblock_mgr.save_filter_urls(list(adblock_mgr._DEFAULT_FILTER_URLS))
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/adblock'></head></html>"
+
+            elif path == "/reset" and browser:
+                defaults = {
+                    "homepage": "strollon://start", "startup_action": 0,
+                    "save_session": True, "search_engine": 2, "clear_on_exit": False,
+                    "do_not_track": True, "ssl_warn_dialog": True,
+                    "download_dir": str(_get_default_downloads_dir()),
+                    "ask_download": True, "enable_javascript": True,
+                    "allow_fullscreen": True, "auto_load_images": True,
+                    "enable_hardware_acceleration": True, "ua_preset": 0,
+                    "ua_custom": "", "adblock_enabled": True, "theme": "Default",
+                    "chromium_custom_args": "",
+                }
+                for key, val in defaults.items():
+                    settings.setValue(key, val)
+                for key in CHROMIUM_FLAGS:
+                    settings.setValue(key, False)
+                settings.sync()
+                browser.apply_settings()
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
+
+            elif path == "/reset-allowlist" and adblock_mgr:
+                adblock_mgr.save_allowlist(list(adblock_mgr._DEFAULT_ALLOWLIST))
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
+
+            elif path == "/update-adblock" and browser:
+                _browser_ref = browser
+                def _on_done(success, message):
+                    # adblock_last_updated は managers.py 側で書き込み済み
+                    log(f"[INFO] AdBlock update: {message}")
+                    # シグナル経由でメインスレッドにリロードを委譲（スレッドセーフ）
+                    _browser_ref._reload_settings_signal.emit()
+                if adblock_mgr:
+                    adblock_mgr.update_filters(callback=_on_done)
+                html = "<html><body></body></html>"
+
+            elif path == "/browse-dir" and browser:
+                from PySide6.QtWidgets import QFileDialog
+                cur = settings.value("download_dir", "") or str(_get_default_downloads_dir())
+                directory = QFileDialog.getExistingDirectory(browser, "ダウンロードフォルダを選択", cur)
+                if directory:
+                    settings.setValue("download_dir", directory)
+                    settings.sync()
+                    browser.apply_settings()
+                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
+
+            else:
+                # /general, /appearance, /adblock, ... などのセクションパス
+                VALID_SECTIONS = {
+                    "general","appearance","privacy","adblock",
+                    "downloads","useragent","advanced","experimental"
+                }
+                # path は "/general" → "general"
+                section = path.lstrip("/") if path.lstrip("/") in VALID_SECTIONS else "general"
+                html = _build_settings_html(
+                    settings, adblock_mgr, themes,
+                    list(USER_AGENT_PRESETS.values()),
+                    list(USER_AGENT_PRESET_NAMES),
+                    CHROMIUM_FLAGS,
+                    str(_get_default_downloads_dir()),
+                    section,
+                )
+
         else:
             job.fail(QWebEngineUrlRequestJob.UrlNotFound)
             return
 
         data = QByteArray(html.encode("utf-8"))
-        buf = QBuffer(job)
+        buf  = QBuffer(job)
         buf.setData(data)
         buf.open(QBuffer.ReadOnly)
         job.reply(b"text/html; charset=utf-8", buf)
@@ -1022,12 +2332,18 @@ class TabItem(QListWidgetItem):
 
 class VerticalTabBrowser(QMainWindow):
     """縦タブブラウザのメインウィンドウ"""
-    
+
+    # バックグラウンドスレッドからメインスレッドへのUI操作委譲用シグナル
+    _reload_settings_signal = Signal()
+
     def __init__(self):
         super().__init__()
         self.tabs = []
         self._closed_tab_stack = []  # 閉じたタブのURLスタック（複数対応）
         self._zoom_levels = {}  # タブごとのズーム倍率 {web_view: float}
+
+        # シグナルをスロットに接続（必ずメインスレッドで実行される）
+        self._reload_settings_signal.connect(self._reload_settings_tab_slot)
         
         # 永続化プロファイルを作成（Cookie、LocalStorageなどが保存される）
         self.profile = QWebEngineProfile("StrollonProfile")
@@ -1113,7 +2429,7 @@ class VerticalTabBrowser(QMainWindow):
                 log(f"[INFO] UserAgent set to preset {ua_preset}")
         
         # Do Not Track ヘッダー設定
-        self.do_not_track = self.settings.value("do_not_track", False, type=bool)
+        self.do_not_track = self.settings.value("do_not_track", True, type=bool)
         self._dnt_interceptor.set_dnt_enabled(self.do_not_track)
         self._dnt_interceptor_incognito.set_dnt_enabled(self.do_not_track)
         log(f"[INFO] DNT header set to: {'1' if self.do_not_track else '0'}")
@@ -1171,32 +2487,43 @@ class VerticalTabBrowser(QMainWindow):
                 download.accept()
                 self.download_manager.add_download(download)
                 self._connect_download_notification(download)
-                self.show_download_dialog()
+                self._start_downloads_page_refresh()
+                self._send_os_notification("ダウンロード開始",
+                    f"{download.downloadFileName()} のダウンロードを開始しました。")
         else:
             download.setDownloadDirectory(str(download_dir))
             download.accept()
             self.download_manager.add_download(download)
             self._connect_download_notification(download)
-            self.show_download_dialog()
+            self._start_downloads_page_refresh()
+            self._send_os_notification("ダウンロード開始",
+                f"{download.downloadFileName()} のダウンロードを開始しました。")
 
     def _connect_download_notification(self, download):
         """ダウンロード完了時に OS 通知を送る。"""
-        from PySide6.QtWebEngineCore import QWebEngineDownloadRequest as _DL
+        # Qt6 QWebEngineDownloadRequest::DownloadState の数値:
+        # 0=Pending, 1=InProgress, 2=Completed, 3=Cancelled, 4=Interrupted
+        captured_filename = download.downloadFileName()
 
-        def _on_state_changed(state):
-            if state == _DL.DownloadState.DownloadCompleted:
-                fname = download.downloadFileName()
+        def _on_state_changed(state, _fname=captured_filename):
+            # enum か int かどちらで来ても .value で正規化
+            state_val = state.value if hasattr(state, 'value') else int(state)
+            if state_val == 2:   # Completed
                 self._send_os_notification(
                     "ダウンロード完了",
-                    f"{fname} のダウンロードが完了しました。"
+                    f"{_fname} のダウンロードが完了しました。"
                 )
-            elif state == _DL.DownloadState.DownloadInterrupted:
-                fname = download.downloadFileName()
+                self._js_reload_downloads_page()
+            elif state_val == 4:  # Interrupted
                 self._send_os_notification(
                     "ダウンロード失敗",
-                    f"{fname} のダウンロードが中断されました。"
+                    f"{_fname} のダウンロードが中断されました。"
                 )
+                self._js_reload_downloads_page()
+            elif state_val == 3:  # Cancelled
+                self._js_reload_downloads_page()
 
+        _on_state_changed._download_ref = download
         download.stateChanged.connect(_on_state_changed)
 
     def _send_os_notification(self, title: str, message: str):
@@ -1499,8 +2826,8 @@ class VerticalTabBrowser(QMainWindow):
         
         if msg_box.clickedButton() == update_btn:
             download_url = (
-                f"https://github.com/ABATBeliever/StrollonBrowser2x/releases/download/"
-                f"{latest_version}/Strollon-{BROWSER_TARGET_ARCHITECTURE}.zip"
+                f"https://abatbeliever.net/software/bin/Strollon/download/"
+                f"{BROWSER_TARGET_ARCHITECTURE}"
             )
             self.add_new_tab(download_url, activate=True)
             log(f"[INFO] UpdateCheck-> Opening download URL: {download_url}")
@@ -1725,37 +3052,12 @@ class VerticalTabBrowser(QMainWindow):
         log(f"[INFO] Always on top: {checked}")
 
     def show_bookmarks_dialog(self):
-        """ブックマークダイアログを表示（現在のページ情報を渡す）"""
-        # 現在のタブのURLとタイトルを取得してダイアログに渡す
-        current_url = ""
-        current_title = ""
-        current_item = self.tab_list.currentItem()
-        if current_item and isinstance(current_item, TabItem):
-            current_url = current_item.web_view.url().toString()
-            current_title = current_item.web_view.title()
-
-        dialog = MainDialog(
-            self.history_manager, self.bookmark_manager, self.download_manager, self,
-            current_url=current_url, current_title=current_title
-        )
-        dialog.open_url.connect(lambda url: self.add_new_tab(url, activate=True))
-        dialog.tab_widget.setCurrentIndex(3)  # ブックマークタブを選択
-        dialog.exec()
+        """ブックマーク一覧を新しいタブで開く"""
+        self.add_new_tab("strollon://favorites", activate=True)
     
     def show_history_dialog(self):
-        """履歴ダイアログを表示"""
-        current_url = ""
-        current_title = ""
-        current_item = self.tab_list.currentItem()
-        if current_item and isinstance(current_item, TabItem):
-            current_url = current_item.web_view.url().toString()
-            current_title = current_item.web_view.title()
-        dialog = MainDialog(
-            self.history_manager, self.bookmark_manager, self.download_manager, self,
-            current_url=current_url, current_title=current_title)
-        dialog.open_url.connect(lambda url: self.add_new_tab(url, activate=True))
-        dialog.tab_widget.setCurrentIndex(2)  # 履歴タブを選択
-        dialog.exec()
+        """閲覧履歴を新しいタブで開く"""
+        self.add_new_tab("strollon://history", activate=True)
     
     def open_local_file(self):
         """ローカルファイルを新しいタブで開く"""
@@ -1776,53 +3078,87 @@ class VerticalTabBrowser(QMainWindow):
             dialog = FindDialog(current_item.web_view, self)
             dialog.exec()
     
+    def _reload_settings_tab_slot(self):
+        """strollon://settings タブをメインスレッドでリロードするスロット。"""
+        for i in range(self.tab_list.count()):
+            item = self.tab_list.item(i)
+            if hasattr(item, 'web_view') and item.web_view.url().toString().startswith("strollon://settings"):
+                item.web_view.reload()
+                break
+
     def show_main_dialog(self):
-        """設定ダイアログ表示（設定タブ）"""
-        current_url = ""
-        current_title = ""
-        current_item = self.tab_list.currentItem()
-        if current_item and isinstance(current_item, TabItem):
-            current_url = current_item.web_view.url().toString()
-            current_title = current_item.web_view.title()
-        dialog = MainDialog(
-            self.history_manager, self.bookmark_manager, self.download_manager, self,
-            current_url=current_url, current_title=current_title)
-        dialog.open_url.connect(lambda url: self.add_new_tab(url, activate=True))
-        dialog.show_settings_tab()
-        dialog.exec()
-    
+        """設定ページを新しいタブで開く"""
+        self.add_new_tab("strollon://settings/general", activate=True)
+
     def show_about_dialog(self):
-        """ブラウザについてダイアログ表示"""
-        current_url = ""
-        current_title = ""
-        current_item = self.tab_list.currentItem()
-        if current_item and isinstance(current_item, TabItem):
-            current_url = current_item.web_view.url().toString()
-            current_title = current_item.web_view.title()
-        dialog = MainDialog(
-            self.history_manager, self.bookmark_manager, self.download_manager, self,
-            current_url=current_url, current_title=current_title)
-        dialog.open_url.connect(lambda url: self.add_new_tab(url, activate=True))
-        dialog.show_about_tab()
-        dialog.exec()
-    
+        """ブラウザについてページを新しいタブで開く"""
+        self.add_new_tab("strollon://about", activate=True)
+
+
+    def _open_or_reload_downloads_page(self):
+        """strollon://downloads タブが既に開いていればリロード、なければ新規タブで開く。"""
+        target = "strollon://downloads"
+        for i in range(self.tab_list.count()):
+            item = self.tab_list.item(i)
+            if isinstance(item, TabItem):
+                if item.web_view.url().toString().startswith(target):
+                    item.web_view.reload()
+                    self.tab_list.setCurrentItem(item)
+                    return
+        self.add_new_tab(target, activate=True)
+
+    def _start_downloads_page_refresh(self):
+        """ダウンロード進行中に strollon://downloads タブをJS部分更新するタイマーを起動。"""
+        if hasattr(self, '_dl_refresh_timer') and self._dl_refresh_timer.isActive():
+            return
+        from PySide6.QtCore import QTimer
+        self._dl_refresh_timer = QTimer(self)
+        self._dl_refresh_timer.setInterval(500)
+        self._dl_refresh_timer.timeout.connect(self._push_download_progress)
+        self._dl_refresh_timer.start()
+
+    def _push_download_progress(self):
+        """進行中DLの進捗をJSで直接DOM更新する（ページリロードなし）。"""
+        import json
+        active = [dl for dl in self.download_manager.get_downloads()
+                  if (dl.state().value if hasattr(dl.state(), 'value') else int(dl.state())) == 1]
+
+        if not active:
+            self._dl_refresh_timer.stop()
+            self._js_reload_downloads_page()
+            return
+
+        # 進捗データをJSONで構築
+        updates = []
+        for dl in active:
+            total = dl.totalBytes()
+            recv  = dl.receivedBytes()
+            pct   = int(recv / total * 100) if total > 0 else 0
+            size_str = (f"{recv/(1024*1024):.1f} / {total/(1024*1024):.1f} MB"
+                        if total > 0 else "計算中...")
+            updates.append({"url": dl.url().toString(), "pct": pct, "size": size_str})
+
+        # strollon://downloads タブを探してJSを実行
+        target = "strollon://downloads"
+        for i in range(self.tab_list.count()):
+            item = self.tab_list.item(i)
+            if isinstance(item, TabItem) and item.web_view.url().toString().startswith(target):
+                js = f"if(typeof updateProgress==='function')updateProgress({json.dumps(updates)});"
+                item.web_view.page().runJavaScript(js)
+                break
+
+    def _js_reload_downloads_page(self):
+        """strollon://downloads タブが開いていれば1回だけリロード。"""
+        target = "strollon://downloads"
+        for i in range(self.tab_list.count()):
+            item = self.tab_list.item(i)
+            if isinstance(item, TabItem) and item.web_view.url().toString().startswith(target):
+                item.web_view.reload()
+                break
+
     def show_download_dialog(self):
-        """ダウンロードマネージャー表示"""
-        # シングルトンを廃止し毎回生成する。
-        # current_url="" で使い回されるとブックマークの「新規追加」が
-        # 無効化されたままになるバグを防ぐため。
-        current_url = ""
-        current_title = ""
-        current_item = self.tab_list.currentItem()
-        if current_item and isinstance(current_item, TabItem):
-            current_url = current_item.web_view.url().toString()
-            current_title = current_item.web_view.title()
-        dialog = MainDialog(
-            self.history_manager, self.bookmark_manager, self.download_manager, self,
-            current_url=current_url, current_title=current_title)
-        dialog.open_url.connect(lambda url: self.add_new_tab(url, activate=True))
-        dialog.show_download_tab()
-        dialog.exec()
+        """ダウンロード一覧を新しいタブで開く"""
+        self.add_new_tab("strollon://downloads", activate=True)
     
     def save_page(self):
         """ページを保存（PNG / PDF）"""
@@ -1934,9 +3270,9 @@ class VerticalTabBrowser(QMainWindow):
         
         bookmark_add_btn = QPushButton()
         bookmark_add_btn.setIcon(qta.icon('fa5s.star', color=STYLES['icon_color_bookmark']))
-        bookmark_add_btn.setToolTip("ブックマーク")
+        bookmark_add_btn.setToolTip("ブックマークに追加 (Ctrl+D)")
         bookmark_add_btn.setFixedSize(32, 32)
-        bookmark_add_btn.clicked.connect(self.show_bookmarks_dialog)
+        bookmark_add_btn.clicked.connect(self.add_bookmark_from_current_tab)
         toolbar.addWidget(bookmark_add_btn)
         
         menu_btn = QPushButton()
@@ -2245,7 +3581,7 @@ class VerticalTabBrowser(QMainWindow):
         # URL と タイトル 両方を候補に（重複排除）
         seen = set()
         candidates = []
-        for url, title, _, _ in results:
+        for _, url, title, _, _ in results:
             if url not in seen:
                 seen.add(url)
                 candidates.append(url)

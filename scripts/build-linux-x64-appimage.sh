@@ -26,7 +26,7 @@ uv run nuitka \
     --enable-plugin=pyside6 \
     --company-name=ABATBeliever \
     --product-name="Strollon WebBrowser" \
-    --file-description="Let's Stroll Internet" \
+    --file-description="Strollon WebBrowser" \
     Strollon.py
 
 echo "[INFO] Building binary OK"

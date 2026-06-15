@@ -1,6 +1,6 @@
 【ソフト名称】Strollon WebBrowser
-【バージョン】0.5.0.0 Preview
-【最終更新日】2026/05/30
+【バージョン】0.6.0.0 Preview
+【最終更新日】2026/06/15
 【 著 作 者 】ABATBeliever
 【 動作環境 】Windows10  / Linux
 【 推奨環境 】Windows11+ / Linux (Wayland)

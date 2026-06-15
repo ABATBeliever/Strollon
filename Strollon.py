@@ -53,8 +53,8 @@ if _SYSTEM not in ("linux", "windows"):
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "0.5.0.0"
-BROWSER_VERSION_NAME     = "0.5.0.0 Preview"
+BROWSER_VERSION_SEMANTIC = "0.6.0.0"
+BROWSER_VERSION_NAME     = "0.6.0.0 Beta"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================
@@ -613,7 +613,7 @@ def main():
     # ---- 起動ヘッダー（コンソールのみ） ----
     print(f"{BROWSER_FULL_NAME}")
     print("\nCopyright (C) 2025-2026 ABATBeliever")
-    print("Strollon WebPage           | https://abatbeliever.net/app/Strollon/")
+    print("Strollon WebPage           | https://abatbeliever.net/software/bin/Strollon/")
     print("Strollon Github Repository | https://github.com/ABATBeliever/Strollon/\n")
 
     from browser import apply_chromium_flags_from_settings
