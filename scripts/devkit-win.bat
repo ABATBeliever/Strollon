@@ -37,7 +37,7 @@ if not exist pyproject.toml (
 :: ── 3. uv sync で依存関係をインストール ─────────────────────
 echo.
 echo [INFO] Syncing dependencies with uv sync...
-uv sync
+uv sync --no-install-project
 if errorlevel 1 (
     echo [ERROR] uv sync failed.
     pause

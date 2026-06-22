@@ -83,7 +83,7 @@ import qtawesome as qta
 
 from constants import STYLES, BROWSER_FULL_NAME, BROWSER_VERSION_SEMANTIC, DOWNLOADS_DIR, USER_AGENT_PRESETS, \
     PROFILE_PATH, INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH, CACHE_DIR, CHECK_FOR_UPDATES, settings, log, \
-    IS_FIRST_RUN, IS_UPDATED, BROWSER_VERSION_NAME, INSTALL, INSTALL_MODE
+    IS_FIRST_RUN, IS_UPDATED, BROWSER_VERSION_NAME, INSTALL, INSTALL_MODE, PDFJS_DIR
 from managers import HistoryManager, BookmarkManager, DownloadManager, SessionManager, UpdateChecker
 from dialogs import AddBookmarkDialog, FindDialog, SavePageDialog
 
@@ -101,6 +101,12 @@ from PySide6.QtWidgets import QListWidgetItem
 from PySide6.QtWebEngineCore import QWebEngineUrlSchemeHandler, QWebEngineUrlRequestJob, QWebEngineUrlScheme
 from PySide6.QtCore import QBuffer, QByteArray
 
+from pdf_viewer import (
+    register_pdf_scheme, PdfSchemeHandler, PDF_SCHEME, PDF_VIEWER_HOST,
+    pdf_cache_dir, cache_path_for_url, clear_pdf_cache, friendly_filename,
+    build_viewer_url, is_pdf_viewer_url, digest_from_viewer_url,
+)
+
 
 def _register_strollon_scheme():
     """strollon:// スキームをQtWebEngineに登録する（QApplication生成前に呼ぶこと）"""
@@ -116,6 +122,7 @@ def _register_strollon_scheme():
 
 # Strollon.py の main() より前に呼ぶため、モジュールロード時に実行
 _register_strollon_scheme()
+register_pdf_scheme()
 
 
 def _build_welcome_html(version_name: str, install: bool) -> str:
@@ -439,14 +446,14 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
             <td class="icon-col"><div class="feature-icon"></div></td>
             <td>
               <span class="feature-name">プライバシー・ファースト</span>
-              <span class="feature-desc">AdblockライブラリとEasyListによる広告ブロックと、Do Not Trackを搭載。</span>
+              <span class="feature-desc">AdblockライブラリとEasyListによる広告ブロックと、Do Not Trackに対応。</span>
             </td>
           </tr>
           <tr>
             <td class="icon-col"><div class="feature-icon"></div></td>
             <td>
               <span class="feature-name">テーマ対応</span>
-              <span class="feature-desc">Default / Dark / Sakura など複数テーマを設定から利用できます。</span>
+              <span class="feature-desc">Default / Dark / Sakura など、複数テーマを設定から利用できます。</span>
             </td>
           </tr>
           <tr>
@@ -487,11 +494,10 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
           <p>Version {version_name} の変更内容です。</p>
         </div>
         <div class="release-scroll">
-          <h2>{version_name} Preview</h2>
+          <h2>{version_name}</h2>
           <ul>
-            <li><span class="tag tag-fix">改善</span> 汎用ダイアログを廃止し、内部URLに移行</li>
-            <li><span class="tag tag-fix">改善</span> 細かい挙動のバグを修正</li>
-            <li><span class="tag tag-fix">改善</span> Linux版のバージョニングのバグを修正</li>
+            <li><span class="tag tag-new">追加</span> PDF.js (v5.4.624)を統合し、PDFファイルのサポートを追加しました</li>
+            <li><span class="tag tag-fix">改善</span> Linux版開発環境の問題を修正</li>
           </ul>
         </div>
       </div>
@@ -1419,6 +1425,8 @@ def _build_settings_html(s, adblock_mgr, themes: list, ua_presets: list,
           </div>
           <label class="check-row"><input type="checkbox" data-key="ask_download" {ck('ask_download',True)}>
             ダウンロード時に保存場所を確認</label>
+          <label class="check-row"><input type="checkbox" data-key="open_pdf_in_viewer" {ck('open_pdf_in_viewer',True)}>
+            PDFファイルを内蔵ビューアで開く（オフの場合は通常のファイルとしてダウンロードされます）</label>
         </div>
       </div>
 
@@ -2007,6 +2015,7 @@ class StrollonSchemeHandler(QWebEngineUrlSchemeHandler):
                     "do_not_track": True, "ssl_warn_dialog": True,
                     "download_dir": str(_get_default_downloads_dir()),
                     "ask_download": True, "enable_javascript": True,
+                    "open_pdf_in_viewer": True,
                     "allow_fullscreen": True, "auto_load_images": True,
                     "enable_hardware_acceleration": True, "ua_preset": 0,
                     "ua_custom": "", "adblock_enabled": True, "theme": "Default",
@@ -2363,6 +2372,24 @@ class VerticalTabBrowser(QMainWindow):
         self.profile.installUrlSchemeHandler(b"strollon", self._strollon_handler)
         self.incognito_profile.installUrlSchemeHandler(b"strollon", self._strollon_handler_incognito)
 
+        # strollon-pdf:// スキームハンドラー（pdf.js）を両プロファイルに登録
+        # キャッシュ先はプロファイルごとに分離する
+        # （シークレットタブのPDFキャッシュは INCOGNITO_CACHE_PATH 配下に置かれ、
+        # 　closeEvent でシークレットデータ一式と共に確実に削除される）
+        self._pdf_handler = PdfSchemeHandler(PDFJS_DIR, pdf_cache_dir(CACHE_DIR), self)
+        self._pdf_handler_incognito = PdfSchemeHandler(PDFJS_DIR, pdf_cache_dir(INCOGNITO_CACHE_PATH), self)
+        self.profile.installUrlSchemeHandler(PDF_SCHEME, self._pdf_handler)
+        self.incognito_profile.installUrlSchemeHandler(PDF_SCHEME, self._pdf_handler_incognito)
+
+        # PDFビューア関連の状態
+        # sha-256(元URL) → 元のPDF URL の逆引き辞書。
+        # QUrl.toString()の文字列化の揺らぎに依存しないようダイジェストをキーにする。
+        self._pdf_digest_to_original: dict[str, str] = {}
+        # 「リンクを保存」等、明示的なダウンロード操作が行われたページの id(page) を
+        # 一時的に記録する（このページからの次のダウンロードはPDFビューアに
+        # 差し替えず、そのまま通常のダウンロードとして扱う）
+        self._explicit_save_pending: set = set()
+
         self.history_manager = HistoryManager()
         self.bookmark_manager = BookmarkManager()
         self.download_manager = DownloadManager()
@@ -2401,7 +2428,9 @@ class VerticalTabBrowser(QMainWindow):
                                  self.settings.value("enable_javascript", True, type=bool))
         web_settings.setAttribute(QWebEngineSettings.AutoLoadImages,
                                  self.settings.value("auto_load_images", True, type=bool))
-        # PDFはダウンロードとして処理する
+        # WebEngine標準のPDFビューアは無効化する。
+        # これによりPDFへのナビゲーションは downloadRequested として検出されるようになり、
+        # on_download_requested 側でキャッシュ経由の内蔵PDFビューア(pdf.js)に振り分けられる。
         web_settings.setAttribute(QWebEngineSettings.PdfViewerEnabled, False)
         
         # ハードウェアアクセラレーション設定
@@ -2462,6 +2491,11 @@ class VerticalTabBrowser(QMainWindow):
         """ダウンロード要求時の処理"""
         filename = download.downloadFileName()
         log(f"[INFO] Download requested: {filename}")
+
+        # ---- PDF はキャッシュ経由で内蔵ビューア(pdf.js)に渡す ----
+        if self._should_open_pdf_in_viewer(download):
+            self._handle_pdf_download(download)
+            return
 
         # 設定からダウンロード先を取得
         from constants import _get_default_downloads_dir
@@ -2525,6 +2559,148 @@ class VerticalTabBrowser(QMainWindow):
 
         _on_state_changed._download_ref = download
         download.stateChanged.connect(_on_state_changed)
+
+    # =====================================================================
+    # PDF ビューア (pdf.js) 関連
+    # =====================================================================
+
+    def _should_open_pdf_in_viewer(self, download) -> bool:
+        """このダウンロードを内蔵PDFビューアに差し替えるべきかどうかを判定する。"""
+        if not self.settings.value("open_pdf_in_viewer", True, type=bool):
+            return False
+        if download.isSavePageDownload():
+            return False
+
+        url = download.url()
+        scheme = url.scheme().lower()
+        # JS が生成した blob: / data: URL（pdf.js自身の「ダウンロード」ボタン等）は
+        # 通常のファイル保存として扱う（ここで横取りすると無限ループになる）
+        if scheme in ("blob", "data"):
+            return False
+        # 既に内蔵ビューアが配信したPDF実体そのものは対象外
+        if scheme == PDF_SCHEME.decode():
+            return False
+
+        mime = (download.mimeType() or "").split(";")[0].strip().lower()
+        is_pdf = mime in ("application/pdf", "application/x-pdf")
+        if not is_pdf:
+            # mimeType が取得できない/不正確な場合の保険として拡張子でも判定
+            is_pdf = url.path().lower().endswith(".pdf")
+        if not is_pdf:
+            return False
+
+        # 「名前を付けてリンク先を保存」等、明示的な保存操作の場合は素通りさせる
+        page = download.page()
+        if page is not None and id(page) in self._explicit_save_pending:
+            self._explicit_save_pending.discard(id(page))
+            return False
+
+        return True
+
+    def _handle_pdf_download(self, download):
+        """PDFダウンロードをキャッシュに保存し、完了後にpdf.jsビューアへ差し替える。"""
+        original_url = download.url().toString()
+        page = download.page()
+        incognito = (page is not None and page.profile() is self.incognito_profile)
+        base_cache = INCOGNITO_CACHE_PATH if incognito else CACHE_DIR
+        cache_path = cache_path_for_url(base_cache, original_url)
+
+        log(f"[INFO] PDF detected, routing to viewer: {original_url}")
+
+        web_view = self._find_view_by_page(page)
+        current_item = self.tab_list.currentItem()
+        if web_view is not None and current_item and getattr(current_item, "web_view", None) == web_view:
+            self._start_progress_bar()
+
+        # 既にキャッシュ済みならネットワークアクセスせずそのまま開く
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            download.cancel()
+            self._open_pdf_viewer(page, original_url, cache_path)
+            return
+
+        download.setDownloadDirectory(str(cache_path.parent))
+        download.setDownloadFileName(cache_path.name)
+        download.accept()
+
+        def _on_state(state, _dl=download, _url=original_url, _path=cache_path, _page=page):
+            state_val = state.value if hasattr(state, 'value') else int(state)
+            if state_val == 2:  # Completed
+                # web_view.setUrl() が直後に呼ばれ、通常のページ読み込みとして
+                # on_load_started/on_load_finished が進捗バーの後処理を行う
+                self._open_pdf_viewer(_page, _url, _path)
+            elif state_val == 4:  # Interrupted
+                self._stop_progress_bar()
+                log(f"[ERROR] PDF download failed: {_url}")
+                self._send_os_notification("PDFの読み込みに失敗しました", _url)
+            elif state_val == 3:  # Cancelled
+                self._stop_progress_bar()
+
+        download.stateChanged.connect(_on_state)
+        # ダウンロードオブジェクトがGCされないよう参照を保持する
+        _on_state._download_ref = download
+
+    def _find_view_by_page(self, page):
+        """QWebEnginePage インスタンスから対応する QWebEngineView を探す。"""
+        if page is None:
+            return None
+        for wv in self.tabs:
+            try:
+                if wv.page() is page:
+                    return wv
+            except RuntimeError:
+                continue  # 既に破棄されたタブ
+        return None
+
+    def _open_pdf_viewer(self, page, original_url: str, cache_path):
+        """キャッシュ済みPDFを pdf.js ビューアで開く。アドレスバーには元URLを表示する。"""
+        web_view = self._find_view_by_page(page)
+        if web_view is None:
+            log(f"[INFO] PDF cached but the originating tab is gone: {original_url}")
+            self._stop_progress_bar()
+            return
+
+        digest = cache_path.stem  # sha-256 がそのままファイル名の stem になっている
+        self._pdf_digest_to_original[digest] = original_url
+
+        viewer_url = build_viewer_url(original_url, cache_path)
+        web_view.setUrl(viewer_url)
+
+    def display_url_for(self, web_view) -> str:
+        """アドレスバー・履歴・ブックマーク等に表示すべきURLを返す。
+        PDFビューアタブの場合は内部URLではなく元のPDF URLを返す。"""
+        if web_view is None:
+            return ""
+        raw = web_view.url().toString()
+        # strollon-pdf:// のビューアURLであれば digest を抽出して元URLを逆引きする。
+        # QUrl.toString() のパーセントエンコーディングの揺らぎに依存しないよう
+        # viewer URLそのものをキーにするのではなく sha-256 をキーにしている。
+        digest = digest_from_viewer_url(raw)
+        if digest:
+            original = self._pdf_digest_to_original.get(digest)
+            if original:
+                return original
+        return raw
+
+    def _hook_explicit_save_actions(self, page):
+        """「名前を付けて保存」系のコンテキストメニュー操作を検知できるようにする。
+        これらの操作から生じたダウンロードはPDFビューアへの差し替え対象から除外する。"""
+        try:
+            from PySide6.QtWebEngineCore import QWebEnginePage as _Page
+            for action_enum in (
+                _Page.WebAction.DownloadLinkToDisk,
+                _Page.WebAction.DownloadImageToDisk,
+                _Page.WebAction.DownloadMediaToDisk,
+            ):
+                act = page.action(action_enum)
+                act.triggered.connect(lambda checked=False, p=page: self._mark_explicit_save(p))
+        except Exception as e:
+            log(f"[WARN] _hook_explicit_save_actions failed: {e}")
+
+    def _mark_explicit_save(self, page):
+        pid = id(page)
+        self._explicit_save_pending.add(pid)
+        # downloadRequested が発火しなかった場合に備えてタイムアウトで自動解除する
+        QTimer.singleShot(5000, lambda: self._explicit_save_pending.discard(pid))
 
     def _send_os_notification(self, title: str, message: str):
         """OS のネイティブ通知を送る。"""
@@ -2640,9 +2816,9 @@ class VerticalTabBrowser(QMainWindow):
                 continue
             if item.incognito:
                 continue
-            url = item.web_view.url().toString()
-            # about: / chrome: / strollon: など復元しても意味のないURLも除外
-            if not url or url.startswith("about:") or url.startswith("chrome:") or url.startswith("strollon:"):
+            url = self.display_url_for(item.web_view)
+            if not url or url.startswith("about:") or url.startswith("chrome:") \
+                    or url.startswith("strollon:") or url.startswith("strollon-pdf:"):
                 continue
             normal_tab_indices.append(i)
             tabs_data.append({
@@ -2827,7 +3003,6 @@ class VerticalTabBrowser(QMainWindow):
         if msg_box.clickedButton() == update_btn:
             download_url = (
                 f"https://abatbeliever.net/software/bin/Strollon/download/"
-                f"{BROWSER_TARGET_ARCHITECTURE}"
             )
             self.add_new_tab(download_url, activate=True)
             log(f"[INFO] UpdateCheck-> Opening download URL: {download_url}")
@@ -2977,7 +3152,7 @@ class VerticalTabBrowser(QMainWindow):
             current_item = self.tab_list.currentItem()
             if not current_item or not isinstance(current_item, TabItem):
                 return
-            url = current_item.web_view.url().toString()
+            url = self.display_url_for(current_item.web_view)
         if not url or url.startswith("about:") or url.startswith("data:"):
             return
         import subprocess
@@ -3172,9 +3347,8 @@ class VerticalTabBrowser(QMainWindow):
         """現在のタブをブックマークに追加"""
         current_item = self.tab_list.currentItem()
         if current_item and isinstance(current_item, TabItem):
-            url = current_item.web_view.url().toString()
+            url = self.display_url_for(current_item.web_view)
             title = current_item.web_view.title() or "無題"
-            
             folders = self.bookmark_manager.get_folders()
             dialog = AddBookmarkDialog(title, url, folders, self)
             
@@ -3370,6 +3544,14 @@ class VerticalTabBrowser(QMainWindow):
         profile = self.incognito_profile if incognito else self.profile
         page = CustomWebEnginePage(profile, web_view)
         page.fullScreenRequested.connect(self.handle_fullscreen_request)
+        self._hook_explicit_save_actions(page)
+        # window.print()（pdf.jsの印刷ボタン等を含む）はQtの「ページを保存」機能に委譲する
+        # ただしバックグラウンドタブからの誤発火を避けるため、現在表示中のタブのみ対象とする
+        def _on_print_requested(_wv=web_view):
+            current_item = self.tab_list.currentItem()
+            if current_item and getattr(current_item, "web_view", None) is _wv:
+                self.save_page()
+        page.printRequested.connect(_on_print_requested)
 
         # new_tab_requested は createWindow 経由では使わないが、
         # JavaScript の window.open() など他の経路で発火することがある。
@@ -3427,7 +3609,7 @@ class VerticalTabBrowser(QMainWindow):
     
     def on_load_finished(self, web_view, incognito=False):
         """ページ読み込み完了時"""
-        url = web_view.url().toString()
+        url = self.display_url_for(web_view)
         title = web_view.title()
         # シークレットタブ・内部URLは履歴に記録しない
         if not incognito and not url.startswith("strollon:"):
@@ -3508,7 +3690,7 @@ class VerticalTabBrowser(QMainWindow):
         self.web_layout.addWidget(web_view)
         web_view.show()
 
-        self.url_bar.setText(web_view.url().toString())
+        self.url_bar.setText(self.display_url_for(web_view))
         if not self.url_bar.hasFocus():
             self.url_bar.home(False)
         zoom = self._zoom_levels.get(web_view, 1.0)
@@ -3537,8 +3719,10 @@ class VerticalTabBrowser(QMainWindow):
         current_item = self.tab_list.currentItem()
         if current_item and isinstance(current_item, TabItem):
             if current_item.web_view == web_view:
-                self.url_bar.setText(url.toString())
-                # フォーカスがURLバーにない場合は先頭を表示
+                raw = url.toString()
+                digest = digest_from_viewer_url(raw)
+                display = (self._pdf_digest_to_original.get(digest) or raw) if digest else raw
+                self.url_bar.setText(display)
                 if not self.url_bar.hasFocus():
                     self.url_bar.home(False)
     
@@ -3702,7 +3886,7 @@ class VerticalTabBrowser(QMainWindow):
         send_menu.setIcon(qta.icon('fa5s.external-link-alt', color=STYLES['icon_color_default']))
         for browser_name, browser_cmd in self._get_external_browsers():
             act = QAction(browser_name, self)
-            url_for_send = item.web_view.url().toString()
+            url_for_send = self.display_url_for(item.web_view)
             act.triggered.connect(
                 lambda checked=False, cmd=browser_cmd, u=url_for_send:
                     self._open_in_browser(cmd, url=u)
@@ -3728,7 +3912,7 @@ class VerticalTabBrowser(QMainWindow):
             if self.tab_list.item(i) == item:
                 # シークレットタブは閉じたタブスタックに追加しない
                 if not item.incognito:
-                    url = item.web_view.url().toString()
+                    url = self.display_url_for(item.web_view)
                     if url and not url.startswith("about:") and not url.startswith("chrome:"):
                         self._closed_tab_stack.append(url)
                         if len(self._closed_tab_stack) > 20:
@@ -3754,14 +3938,14 @@ class VerticalTabBrowser(QMainWindow):
     def duplicate_tab(self, item):
         """タブを複製"""
         if isinstance(item, TabItem):
-            url = item.web_view.url().toString()
+            url = self.display_url_for(item.web_view)
             self.add_new_tab(url, activate=True)
             log(f"[INFO] TabControl: Duplicate - {url}")
     
     def add_bookmark_from_tab(self, item):
         """指定されたタブをブックマークに追加"""
         if isinstance(item, TabItem):
-            url = item.web_view.url().toString()
+            url = self.display_url_for(item.web_view)
             title = item.web_view.title() or "無題"
             
             folders = self.bookmark_manager.get_folders()
@@ -3812,5 +3996,12 @@ class VerticalTabBrowser(QMainWindow):
                     log(f"[INFO] Incognito data removed: {_incognito_path}")
             except Exception as _e:
                 log(f"[WARN] Failed to remove incognito data {_incognito_path}: {_e}")
+
+        # 通常プロファイルのPDFキャッシュも終了時にクリア（起動時にも再度クリアされる）
+        try:
+            clear_pdf_cache(CACHE_DIR)
+            log("[INFO] PDF cache cleared (shutdown)")
+        except Exception as _e:
+            log(f"[WARN] Failed to clear PDF cache: {_e}")
 
         event.accept()

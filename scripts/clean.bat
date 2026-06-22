@@ -4,6 +4,7 @@ setlocal
 cd /d %~dp0\..
 
 echo [INFO] Cleanup...
+del /f uv.lock
 del /f nuitka-crash-report.xml
 rmdir /S /Q .venv
 rmdir /S /Q "Strollon.build"

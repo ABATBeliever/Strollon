@@ -27,6 +27,7 @@ uv run nuitka \
     --company-name=ABATBeliever \
     --product-name="Strollon WebBrowser" \
     --file-description="Strollon WebBrowser" \
+    --include-data-dir=resources/pdfjs=resources/pdfjs \
     Strollon.py
 
 echo "[INFO] Building binary OK"

@@ -1,3 +1,16 @@
+This project uses multiple licenses:
+
+- Strollon itself: GNU Lesser General Public License v3.0 (LGPL-3.0)
+  See below
+
+- resources/pdfjs/: Apache License 2.0
+  Copyright (c) Mozilla Foundation and individual contributors
+  See resources/pdfjs/LICENSE or https://www.apache.org/licenses/LICENSE-2.0
+  Source: https://github.com/mozilla/pdf.js (v5.4.624)
+
+---
+
+
                    GNU LESSER GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
 

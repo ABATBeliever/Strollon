@@ -53,8 +53,8 @@ if _SYSTEM not in ("linux", "windows"):
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "0.6.0.0"
-BROWSER_VERSION_NAME     = "0.6.0.0 Beta"
+BROWSER_VERSION_SEMANTIC = "0.7.0.0"
+BROWSER_VERSION_NAME     = "0.7.0.0 Preview"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================
@@ -135,6 +135,16 @@ def _get_exe_dir() -> Path:
     return Path(__file__).parent.resolve()
 
 _EXE_DIR = _get_exe_dir()
+
+# =====================================================================
+# pdf.js リソースディレクトリ
+# =====================================================================
+# アプリ本体に同梱する静的アセット（Apache-2.0 / pdf.js）。
+# ユーザーデータではないため XDG ディレクトリではなく実行ファイル隣に置く。
+# 配置例: <EXE_DIR>/resources/pdfjs/{web,build,LICENSE}
+# =====================================================================
+
+PDFJS_DIR = _EXE_DIR / "resources" / "pdfjs"
 
 
 def _get_default_downloads_dir() -> Path:
@@ -348,6 +358,7 @@ class StrollonSettings:
         "do_not_track":                 True,
         "download_dir":                 "",
         "ask_download":                 True,
+        "open_pdf_in_viewer":           True,
         "enable_javascript":            True,
         "allow_fullscreen":             True,
         "auto_load_images":             True,
@@ -619,6 +630,14 @@ def main():
     from browser import apply_chromium_flags_from_settings
     apply_chromium_flags_from_settings()
 
+    # ---- PDFキャッシュを起動時にクリア（終了時にも closeEvent でクリアする）----
+    try:
+        from pdf_viewer import clear_pdf_cache
+        clear_pdf_cache(CACHE_DIR)
+        log("[INFO] PDF cache cleared (startup)")
+    except Exception as e:
+        log(f"[WARN] PDF cache clear failed: {e}")
+
     app = QApplication(sys.argv)
     font = QFont()
     font.setPointSize(8)
@@ -642,6 +661,11 @@ def main():
     log(f"[INFO] Themes Dir   : {THEMES_DIR}")
     log(f"[INFO] Log File     : {LOG_FILE}")
     log(f"[INFO] Theme        : {theme_name}")
+    if PDFJS_DIR.exists():
+        log(f"[INFO] pdf.js Dir   : {PDFJS_DIR}")
+    else:
+        log(f"[WARN] pdf.js Dir not found: {PDFJS_DIR} "
+            f"(PDFファイルは内蔵ビューアではなく通常ダウンロードとして扱われます)")
 
     # 初回起動 / バージョン更新: 設定ファイルにバージョンを記録
     # （restore_session より前に必ず sync して IS_UPDATED が次回 False になるよう保証する）
