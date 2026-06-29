@@ -1,0 +1,23 @@
+[project]
+name = "strollon"
+version = "0.7.1.0"
+description = "Strollon WebBrowser"
+requires-python = ">=3.12"
+dependencies = [
+    "pyside6",
+    "qtawesome",
+    "packaging",
+    "nuitka",
+    "adblock",
+    "windows-toasts; sys_platform == 'win32'",
+]
+
+[dependency-groups]
+dev = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false

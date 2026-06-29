@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Strollon WebBrowser
+Exec=Strollon
+Icon=app
+Type=Application
+Categories=Network;WebBrowser;
+X-AppImage-Version=0.2.0.0
