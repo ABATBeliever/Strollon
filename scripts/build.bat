@@ -1,2 +1,0 @@
-@echo off
-uv run nuitka --standalone --enable-plugin=pyside6 --windows-console-mode=disable --windows-icon-from-ico="img/icon-win.ico" --msvc=latest --company-name=ABATBeliever --product-name="Strollon WebBrowser" --file-version=0.7.0.0 --product-version=0.7.0.0 --file-description="Strollon WebBrowser" --copyright="Copyright (C) 2025-2026 ABATBeliever" --include-data-dir=resources/pdfjs=resources/pdfjs --remove-output --include-package=winrt --include-package=windows_toasts Strollon.py
