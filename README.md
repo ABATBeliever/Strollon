@@ -1,7 +1,7 @@
 # Strollon WebBrowser - インターネットを散歩しよう
 
 ![License](https://img.shields.io/badge/license-LGPLv3-blue.svg)
-![Version](https://img.shields.io/badge/version-0.7.1.0-green.svg)
+![Version](https://img.shields.io/badge/version-0.7.4.0-green.svg)
 ![Version](https://img.shields.io/badge/Language-Python-yellow.svg)
 
 ---

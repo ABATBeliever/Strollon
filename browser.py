@@ -125,6 +125,148 @@ _register_strollon_scheme()
 register_pdf_scheme()
 
 
+# =====================================================================
+# strollon:// 内部ページのセキュリティ基盤
+# =====================================================================
+# 0.7.3.0 [1.0.0.0-rc1] で導入されたセキュリティ強化:
+#   1. アクショントークン: 状態変更を伴うエンドポイント(設定保存・削除・
+#      クリアなど)はすべて、プロセス起動時に生成した秘密トークンを
+#      クエリパラメータ `_t` として要求する。外部Webページはこの値を
+#      知り得ないため、img/location.href によるCSRF的な呼び出しを防ぐ。
+#   2. オリジン検証: リクエストの発行元(job.requestInitiator())が
+#      strollon:// 自身、またはユーザー操作由来（initiatorなし）で
+#      ない場合は、状態変更エンドポイントへのアクセスを拒否する。
+#      トークンとオリジン検証は独立した二重の防御であり、片方が
+#      何らかの理由で回避されてももう片方が守る設計。
+# =====================================================================
+
+import secrets as _secrets
+import hmac as _hmac
+
+_STROLLON_ACTION_TOKEN: str = _secrets.token_urlsafe(32)
+
+
+def _strollon_token() -> str:
+    """このプロセス内で有効なアクショントークンを返す（内部ページのJSに埋め込む用）。"""
+    return _STROLLON_ACTION_TOKEN
+
+
+def _verify_action_token(url: "QUrl") -> bool:
+    """クエリの `_t` パラメータが現在のアクショントークンと一致するか検証する。"""
+    from PySide6.QtCore import QUrlQuery as _QUQ
+    given = _QUQ(url.query()).queryItemValue("_t", QUrl.FullyDecoded)
+    return bool(given) and _hmac.compare_digest(given, _STROLLON_ACTION_TOKEN)
+
+
+def _verify_request_origin(job: "QWebEngineUrlRequestJob") -> bool:
+    """
+    リクエスト発行元が strollon:// 自身、またはユーザー操作由来（initiatorなし）
+    であることを検証する。外部Webページからの strollon:// への直接リクエスト
+    （img/fetch/トップレベルナビゲーション等）はここで弾かれる。
+    """
+    try:
+        initiator = job.requestInitiator()
+    except Exception:
+        return True  # initiator取得不可の環境では既存動作を維持（トークン側で防御）
+    if initiator is None or initiator.isEmpty():
+        return True  # ユーザー操作（アドレスバー直接入力等）由来
+    return initiator.scheme().lower() == "strollon"
+
+
+# strollon:// 配下で「状態変更」を伴うパス。(host, path) の組で管理する。
+_STROLLON_MUTATING_PATHS: set[tuple[str, str]] = {
+    ("history", "/clear"), ("history", "/delete"),
+    ("favorites", "/delete"), ("favorites", "/import"),
+    ("downloads", "/clear"), ("downloads", "/delete"), ("downloads", "/cancel"),
+    ("settings", "/save"), ("settings", "/save-single"),
+    ("settings", "/save-allowlist"), ("settings", "/save-filter-urls"),
+    ("settings", "/reset-filter-urls"), ("settings", "/reset"),
+    ("settings", "/reset-allowlist"), ("settings", "/update-adblock"),
+    ("settings", "/browse-dir"),
+}
+
+
+def _reject_job(job: "QWebEngineUrlRequestJob", reason: str, url: "QUrl"):
+    log(f"[WARN] strollon:// request denied ({reason}): {url.toString()}")
+    job.fail(QWebEngineUrlRequestJob.RequestDenied)
+
+
+# =====================================================================
+# メインスレッドへの安全な処理委譲
+# =====================================================================
+# QWebEngineUrlSchemeHandler.requestStarted() は Qt WebEngine の実装上、
+# GUIメインスレッドではなく IOスレッド（Chromiumのネットワークスレッド）から
+# 呼び出される。にもかかわらず StrollonSchemeHandler は QFileDialog を
+# 開いたり、history_manager / bookmark_manager / apply_settings() など
+# GUIオブジェクトに触れる処理を直接行っており、未定義動作やクラッシュの
+# 原因になり得た（UpdateChecker(QThread)はシグナル経由で正しく実装されていた
+# のと対照的に、こちらは "Qtの内部関数を直接叩いている" 状態だった）。
+#
+# BlockingQueuedConnection を使い、実際の処理はメインスレッドで実行して
+# 結果だけをIOスレッドに返す。メインスレッドから呼ばれた場合はそのまま
+# 直接実行する（余計なオーバーヘッド・デッドロックを避けるため）。
+# =====================================================================
+
+from PySide6.QtCore import QObject, Signal as _Signal, Qt as _Qt_ns, QThread as _QThread
+
+
+class _MainThreadInvoker(QObject):
+    _invoke_sig = _Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self._invoke_sig.connect(self._run, _Qt_ns.ConnectionType.BlockingQueuedConnection)
+        self._result = None
+        self._exc = None
+
+    def _run(self, fn):
+        try:
+            self._result = fn()
+            self._exc = None
+        except Exception as e:  # noqa: BLE001
+            self._exc = e
+            self._result = None
+
+    def call(self, fn):
+        app = QApplication.instance()
+        if app is None or _QThread.currentThread() is app.thread():
+            # 既にメインスレッド上（通常の直接呼び出し等）なら委譲不要
+            return fn()
+        self._invoke_sig.emit(fn)
+        if self._exc is not None:
+            raise self._exc
+        return self._result
+
+
+_main_thread_invoker: "_MainThreadInvoker | None" = None
+
+
+def init_main_thread_invoker():
+    """
+    QApplication 生成直後（＝確実にメインスレッド上）に一度だけ呼ぶこと。
+    ここで生成しておかないと、初回呼び出しがたまたまIOスレッドから来た場合に
+    _MainThreadInvoker 自身がIOスレッド所属になってしまい、
+    BlockingQueuedConnection によるメインスレッドへの委譲が機能しなくなる。
+    """
+    global _main_thread_invoker
+    if _main_thread_invoker is None:
+        _main_thread_invoker = _MainThreadInvoker()
+
+
+def run_on_main_thread(fn):
+    """
+    fn を必ずGUIメインスレッドで実行し、その戻り値を返す。
+    呼び出し元がどのスレッドであっても安全に使える。
+    """
+    global _main_thread_invoker
+    if _main_thread_invoker is None:
+        # init_main_thread_invoker() が呼ばれていない場合のフォールバック。
+        # ここに到達すること自体が想定外だが、安全側に倒して生成する。
+        log("[WARN] _main_thread_invoker not initialized before use; creating lazily")
+        _main_thread_invoker = _MainThreadInvoker()
+    return _main_thread_invoker.call(fn)
+
+
 def _build_welcome_html(version_name: str, install: bool) -> str:
     """
     strollon://welcome 用HTML。
@@ -587,6 +729,7 @@ def _build_history_html(history_records: list) -> str:
     """strollon://history 用HTML。id付き閲覧履歴ページ。"""
     from datetime import datetime, date, timedelta, timezone
     from html import escape
+    import json
 
     rows_html = ""
     today     = date.today()
@@ -678,6 +821,8 @@ def _build_history_html(history_records: list) -> str:
 </div>
 <div class="content" id="content">{rows_html}</div>
 <script>
+const __ST = {json.dumps(_strollon_token())};
+function __withTok(u) {{ return u + (u.includes('?') ? '&' : '?') + '_t=' + encodeURIComponent(__ST); }}
 function filterEntries(q) {{
   q = q.toLowerCase();
   document.querySelectorAll('.entry').forEach(el => {{
@@ -695,19 +840,39 @@ function filterEntries(q) {{
 function deleteEntry(type, id) {{
   const el = document.getElementById(type[0] + id);
   if (el) el.style.opacity = '0.3';
-  location.href = 'strollon://' + type + '/delete?id=' + id;
+  location.href = __withTok('strollon://' + type + '/delete?id=' + id);
 }}
 function clearAll() {{
-  if (confirm('閲覧履歴をすべて削除しますか？')) location.href = 'strollon://history/clear';
+  if (confirm('閲覧履歴をすべて削除しますか？')) location.href = __withTok('strollon://history/clear');
 }}
 </script>
 </body>
 </html>"""
 
 
+
+# strollon:// ページ内でクリック可能なリンクとして許可するURLスキーム。
+# javascript: / data: / vbscript: 等は同一オリジン内でのスクリプト実行
+# （＝アクショントークンの窃取）につながるため、描画時に必ず再検証する。
+_SAFE_BOOKMARK_SCHEMES = {"http", "https", "ftp", "file", "mailto", "strollon"}
+
+
+def _is_safe_bookmark_url(url: str) -> bool:
+    """ブックマークURLが安全に遷移可能なスキームかを判定する（防御的二重チェック）。"""
+    from urllib.parse import urlparse
+    try:
+        # 制御文字・前後の空白を除去してから判定（先頭空白等での判定回避を防ぐ）
+        normalized = "".join(ch for ch in url.strip() if ch.isprintable())
+        scheme = urlparse(normalized).scheme.lower()
+        return scheme in _SAFE_BOOKMARK_SCHEMES
+    except Exception:
+        return False
+
+
 def _build_favorites_html(bookmark_records: list) -> str:
     """strollon://favorites 用HTML。インポート/エクスポート/単品削除付き。"""
     from html import escape
+    import json
 
     folders: dict = {}
     for bm_id, title, url, folder in bookmark_records:
@@ -717,11 +882,16 @@ def _build_favorites_html(bookmark_records: list) -> str:
     for folder_name, items in folders.items():
         content_html += f'<div class="folder-header">{escape(folder_name)}</div>\n'
         for bm_id, title, url in items:
-            safe_url   = escape(url)
             safe_title = escape((title or url)[:120])
             safe_disp  = escape(url[:80] + ("…" if len(url) > 80 else ""))
+            # 危険スキーム（javascript: 等）は描画時点でクリック不能にする
+            if _is_safe_bookmark_url(url):
+                safe_url = escape(url)
+                body_open = f'<div class="entry-body" onclick="location.href=\'{safe_url}\'">'
+            else:
+                body_open = '<div class="entry-body" title="この項目は安全でないため開けません">'
             content_html += f"""<div class="entry" id="b{bm_id}">
-  <div class="entry-body" onclick="location.href='{safe_url}'">
+  {body_open}
     <div class="entry-title">{safe_title}</div>
     <div class="entry-url">{safe_disp}</div>
   </div>
@@ -778,6 +948,8 @@ def _build_favorites_html(bookmark_records: list) -> str:
 </div>
 <div class="content" id="content">{content_html}</div>
 <script>
+const __ST = {json.dumps(_strollon_token())};
+function __withTok(u) {{ return u + (u.includes('?') ? '&' : '?') + '_t=' + encodeURIComponent(__ST); }}
 function filterEntries(q) {{
   q = q.toLowerCase();
   document.querySelectorAll('.entry').forEach(el => {{
@@ -796,7 +968,7 @@ function deleteBookmark(id) {{
   if (!confirm('このブックマークを削除しますか？')) return;
   const el = document.getElementById('b' + id);
   if (el) el.style.opacity = '0.3';
-  location.href = 'strollon://favorites/delete?id=' + id;
+  location.href = __withTok('strollon://favorites/delete?id=' + id);
 }}
 function doImport(input) {{
   const file = input.files[0];
@@ -804,7 +976,7 @@ function doImport(input) {{
   const reader = new FileReader();
   reader.onload = function(e) {{
     const b64 = btoa(unescape(encodeURIComponent(e.target.result)));
-    location.href = 'strollon://favorites/import?data=' + encodeURIComponent(b64);
+    location.href = __withTok('strollon://favorites/import?data=' + encodeURIComponent(b64));
   }};
   reader.readAsText(file, 'utf-8');
 }}
@@ -887,7 +1059,8 @@ def _build_downloads_html(download_manager) -> str:
         rows_html = '<p class="empty">ダウンロード履歴はありません。</p>'
 
     import json
-    url_map_js = json.dumps(url_to_id)
+    # </script> によるHTMLパーサレベルでの脱出を防ぐ（ファイル名やURLに含まれ得る）
+    url_map_js = json.dumps(url_to_id).replace("</", "<\\/")
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -939,6 +1112,8 @@ def _build_downloads_html(download_manager) -> str:
 </div>
 <div class="content" id="content">{rows_html}</div>
 <script>
+const __ST = {json.dumps(_strollon_token())};
+function __withTok(u) {{ return u + (u.includes('?') ? '&' : '?') + '_t=' + encodeURIComponent(__ST); }}
 const urlToId = {url_map_js};
 
 // Python側タイマーから呼ばれる: [{{"url":..., "pct":..., "size":...}}, ...]
@@ -957,16 +1132,16 @@ function updateProgress(updates) {{
 
 function cancelDownload(url) {{
   if (!confirm('ダウンロードを中止しますか？')) return;
-  location.href = 'strollon://downloads/cancel?url=' + encodeURIComponent(url);
+  location.href = __withTok('strollon://downloads/cancel?url=' + encodeURIComponent(url));
 }}
 function deleteDownload(id) {{
   const el = document.getElementById('d' + id);
   if (el) el.style.opacity = '0.4';
-  location.href = 'strollon://downloads/delete?id=' + id;
+  location.href = __withTok('strollon://downloads/delete?id=' + id);
 }}
 function clearAll() {{
   if (confirm('完了・キャンセル・中断済みのダウンロード履歴を削除しますか？'))
-    location.href = 'strollon://downloads/clear';
+    location.href = __withTok('strollon://downloads/clear');
 }}
 </script>
 </body>
@@ -1001,16 +1176,22 @@ def _build_bookmarks_export_html(bookmark_records: list) -> str:
 def _import_bookmarks_html(bookmark_manager, html_data: str):
     """NetscapeブックマークHTMLをパースしてDBにインポートする。"""
     import re
+    from html import unescape
     current_folder = "インポート"
     for line in html_data.splitlines():
         h3 = re.search(r'<H3[^>]*>([^<]+)</H3>', line, re.IGNORECASE)
         if h3:
-            current_folder = h3.group(1).strip()
+            # HTMLエンティティ（&amp; 等）をデコードしてから保持する。
+            # 描画時は _build_favorites_html 側で改めて escape() されるため二重エスケープにならない。
+            current_folder = unescape(h3.group(1).strip())
             continue
         a = re.search(r'<A\s+[^>]*HREF="([^"]+)"[^>]*>([^<]*)</A>', line, re.IGNORECASE)
         if a:
-            url, title = a.group(1).strip(), a.group(2).strip()
-            if url and not url.startswith("javascript:"):
+            url   = unescape(a.group(1).strip())
+            title = unescape(a.group(2).strip())
+            # javascript: / data: / vbscript: 等の危険スキームは大文字小文字・前後空白を
+            # 問わず確実に除外する（"JavaScript:" や先頭空白での回避を防ぐ）。
+            if url and _is_safe_bookmark_url(url):
                 bookmark_manager.add_bookmark(title or url, url, current_folder)
 
 
@@ -1289,6 +1470,7 @@ def _build_settings_html(s, adblock_mgr, themes: list, ua_presets: list,
         for u in filter_urls
     ) or '<div class="al-empty">（なし）</div>'
 
+    # </script> によるHTMLパーサレベルでの脱出を防ぐ（フィルターURL等のユーザー入力に含まれ得るため）
     init_data = json.dumps({
         "allowlist":      allowlist,
         "filter_urls":    filter_urls,
@@ -1297,7 +1479,8 @@ def _build_settings_html(s, adblock_mgr, themes: list, ua_presets: list,
         "adblock_status": json.loads(adblock_status_json),
         "default_filter_urls": getattr(adblock_mgr, '_DEFAULT_FILTER_URLS', []) if adblock_mgr else [],
         "active_section": active_section,
-    })
+        "action_token":   _strollon_token(),
+    }).replace("</", "<\\/")
 
     def ck(key, default=True):
         return "checked" if sb(key, default) else ""
@@ -1489,6 +1672,8 @@ let filterUrls  = INIT.filter_urls.slice();
 const uaPresets      = INIT.ua_presets;
 const uaPresetCount  = INIT.ua_preset_count;
 const defaultFilterUrls = INIT.default_filter_urls;
+const __ST = INIT.action_token;
+function __withTok(u) {{ return u + (u.includes('?') ? '&' : '?') + '_t=' + encodeURIComponent(__ST); }}
 
 // --- adblock情報の即時表示 ---
 (function() {{
@@ -1530,8 +1715,8 @@ function saveSetting(key, value, type) {{
   if (type === 'int')  value = parseInt(value);
   if (type === 'bool') value = (value === true || value === 'true');
   const img = new Image();
-  img.src = 'strollon://settings/save-single?key='
-    + encodeURIComponent(key) + '&val=' + encodeURIComponent(JSON.stringify(value));
+  img.src = __withTok('strollon://settings/save-single?key='
+    + encodeURIComponent(key) + '&val=' + encodeURIComponent(JSON.stringify(value)));
 }}
 function wireAll() {{
   document.querySelectorAll('[data-key]').forEach(el => {{
@@ -1547,7 +1732,7 @@ function wireAll() {{
 wireAll();
 
 // --- ダウンロード保存先 ---
-function browseDir() {{ location.href = 'strollon://settings/browse-dir'; }}
+function browseDir() {{ location.href = __withTok('strollon://settings/browse-dir'); }}
 
 // --- UA プリセット ---
 function onUaPresetChanged(idx) {{
@@ -1567,7 +1752,7 @@ function updateFilters(btn) {{
   btn.disabled = true;
   btn.textContent = 'ダウンロード中...';
   const img = new Image();
-  img.src = 'strollon://settings/update-adblock';
+  img.src = __withTok('strollon://settings/update-adblock');
   // Python側の完了コールバックがページをリロードするため、JSでの後処理は不要
 }}
 
@@ -1594,7 +1779,7 @@ function renderFilterUrls() {{
     }});
   }}
   const img = new Image();
-  img.src = 'strollon://settings/save-filter-urls?data=' + encodeURIComponent(JSON.stringify(filterUrls));
+  img.src = __withTok('strollon://settings/save-filter-urls?data=' + encodeURIComponent(JSON.stringify(filterUrls)));
 }}
 function addFilterUrl() {{
   const inp = document.getElementById('filter-url-input');
@@ -1640,7 +1825,7 @@ function renderAllowlist() {{
     }});
   }}
   const img = new Image();
-  img.src = 'strollon://settings/save-allowlist?data=' + encodeURIComponent(JSON.stringify(allowlist));
+  img.src = __withTok('strollon://settings/save-allowlist?data=' + encodeURIComponent(JSON.stringify(allowlist)));
 }}
 function addAllowlist() {{
   const inp = document.getElementById('al-input');
@@ -1655,7 +1840,7 @@ function removeAllowlist(entry) {{
 }}
 function resetAllowlist() {{
   if (!confirm('除外リストを既定値に戻しますか？')) return;
-  location.href = 'strollon://settings/reset-allowlist';
+  location.href = __withTok('strollon://settings/reset-allowlist');
 }}
 document.getElementById('al-list').addEventListener('click', function(ev) {{
   const btn = ev.target.closest('.al-del[data-entry]');
@@ -1666,7 +1851,7 @@ document.getElementById('al-list').addEventListener('click', function(ev) {{
 // --- 全体リセット ---
 function resetDefaults() {{
   if (confirm('全ての設定を既定値に戻しますか？'))
-    location.href = 'strollon://settings/reset';
+    location.href = __withTok('strollon://settings/reset');
 }}
 </script>
 </body></html>"""
@@ -1845,241 +2030,264 @@ class StrollonSchemeHandler(QWebEngineUrlSchemeHandler):
         host = url.host().lower()
         path = url.path().lower()
 
-        # ブラウザインスタンスを取得（データ参照・クリア操作に使用）
-        browser = None
-        p = self.parent()
-        while p:
-            if isinstance(p, VerticalTabBrowser):
-                browser = p
-                break
-            p = p.parent() if hasattr(p, 'parent') else None
-
-        if host == "welcome":
-            html = _build_welcome_html(BROWSER_VERSION_NAME, INSTALL)
-
-        elif host == "start":
-            html = _build_start_html()
-
-        elif host == "history":
-            if path == "/clear" and browser:
-                browser.history_manager.clear_history()
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://history'></head></html>"
-            elif path == "/delete" and browser:
-                try:
-                    from PySide6.QtCore import QUrlQuery as _QUQ
-                    hid = int(_QUQ(url.query()).queryItemValue("id", QUrl.FullyDecoded))
-                    browser.history_manager.delete_history(hid)
-                except (ValueError, Exception):
-                    pass
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://history'></head></html>"
-            elif browser:
-                records = browser.history_manager.get_history(500)
-                html = _build_history_html(records)
-            else:
-                html = _build_history_html([])
-
-        elif host == "favorites":
-            if path == "/delete" and browser:
-                try:
-                    from PySide6.QtCore import QUrlQuery as _QUQ
-                    bid = int(_QUQ(url.query()).queryItemValue("id", QUrl.FullyDecoded))
-                    browser.bookmark_manager.delete_bookmark(bid)
-                except (ValueError, Exception):
-                    pass
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://favorites'></head></html>"
-            elif path == "/export" and browser:
-                html = _build_bookmarks_export_html(browser.bookmark_manager.get_bookmarks())
-            elif path == "/import" and browser:
-                try:
-                    import base64
-                    from PySide6.QtCore import QUrlQuery as _QUQ
-                    b64 = _QUQ(url.query()).queryItemValue("data", QUrl.FullyDecoded)
-                    html_data = base64.b64decode(b64).decode("utf-8", errors="replace")
-                    _import_bookmarks_html(browser.bookmark_manager, html_data)
-                except Exception as _e:
-                    log(f"[WARN] Bookmark import failed: {_e}")
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://favorites'></head></html>"
-            elif browser:
-                records = browser.bookmark_manager.get_bookmarks()
-                html = _build_favorites_html(records)
-            else:
-                html = _build_favorites_html([])
-
-        elif host == "downloads":
-            if path == "/clear" and browser:
-                browser.download_manager.clear_download_history()
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://downloads'></head></html>"
-            elif path == "/delete" and browser:
-                try:
-                    from PySide6.QtCore import QUrlQuery as _QUQ
-                    did = int(_QUQ(url.query()).queryItemValue("id", QUrl.FullyDecoded))
-                    browser.download_manager.delete_download(did)
-                except (ValueError, Exception):
-                    pass
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://downloads'></head></html>"
-            elif path == "/cancel" and browser:
-                try:
-                    from PySide6.QtCore import QUrlQuery as _QUQ
-                    cancel_url = _QUQ(url.query()).queryItemValue("url", QUrl.FullyDecoded)
-                    for dl in browser.download_manager.get_downloads():
-                        if dl.url().toString() == cancel_url:
-                            dl.cancel()
-                            break
-                except Exception:
-                    pass
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://downloads'></head></html>"
-            elif browser:
-                html = _build_downloads_html(browser.download_manager)
-            else:
-                html = _build_downloads_html(type('_DM', (), {
-                    'get_download_history': lambda s, n: [],
-                    'get_downloads': lambda s: []
-                })())
-
-        elif host == "about":
-            html = _build_about_html(BROWSER_VERSION_NAME, INSTALL_MODE,
-                                     CONFIG_FILE, DATA_DIR, BROWSER_TARGET_ARCHITECTURE)
-
-        elif host == "settings":
-            import json as _json
-
-            adblock_mgr = getattr(browser, 'adblock_manager', None) if browser else None
-            _te = None
-            try:
-                import theme as _theme_mod
-                _te = _theme_mod.theme_engine
-            except Exception:
-                pass
-            themes = _te.list_themes() if _te else ["Default"]
-
-            if path == "/save" and browser:
-                try:
-                    from PySide6.QtCore import QUrlQuery as _QUQ
-                    _qs = _QUQ(url.query())
-                    data_enc = _qs.queryItemValue("data", QUrl.FullyDecoded)
-                    data = _json.loads(data_enc)
-                    for key, val in data.items():
-                        if key == "_allowlist":
-                            if adblock_mgr:
-                                adblock_mgr.save_allowlist(val)
-                        else:
-                            settings.setValue(key, val)
-                    settings.sync()
-                    browser.apply_settings()
-                    log(f"[INFO] Settings saved: section={_qs.queryItemValue('section', QUrl.FullyDecoded)}")
-                except Exception as _e:
-                    log(f"[WARN] Settings save failed: {_e}")
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
-
-            elif path == "/save-single" and browser:
-                # 即時保存（ページ遷移なし）
-                try:
-                    from PySide6.QtCore import QUrlQuery as _QUQ
-                    _qs = _QUQ(url.query())
-                    key = _qs.queryItemValue("key", QUrl.FullyDecoded)
-                    val_raw = _qs.queryItemValue("val", QUrl.FullyDecoded)
-                    val = _json.loads(val_raw)
-                    settings.setValue(key, val)
-                    settings.sync()
-                    browser.apply_settings()
-                    log(f"[INFO] Setting saved: {key} = {val}")
-                except Exception as _e:
-                    log(f"[WARN] save-single failed: {_e}")
-                html = "<html><body></body></html>"
-
-            elif path == "/save-allowlist" and adblock_mgr:
-                try:
-                    from PySide6.QtCore import QUrlQuery as _QUQ
-                    data_enc = _QUQ(url.query()).queryItemValue("data", QUrl.FullyDecoded)
-                    new_list = _json.loads(data_enc)
-                    adblock_mgr.save_allowlist(new_list)
-                    log(f"[INFO] Allowlist saved: {len(new_list)} entries")
-                except Exception as _e:
-                    log(f"[WARN] save-allowlist failed: {_e}")
-                html = "<html><body></body></html>"
-
-            elif path == "/save-filter-urls" and adblock_mgr:
-                try:
-                    from PySide6.QtCore import QUrlQuery as _QUQ
-                    data_enc = _QUQ(url.query()).queryItemValue("data", QUrl.FullyDecoded)
-                    new_urls = _json.loads(data_enc)
-                    adblock_mgr.save_filter_urls(new_urls)
-                    log(f"[INFO] Filter URLs saved: {len(new_urls)} entries")
-                except Exception as _e:
-                    log(f"[WARN] save-filter-urls failed: {_e}")
-                html = "<html><body></body></html>"
-
-            elif path == "/reset-filter-urls" and adblock_mgr:
-                adblock_mgr.save_filter_urls(list(adblock_mgr._DEFAULT_FILTER_URLS))
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/adblock'></head></html>"
-
-            elif path == "/reset" and browser:
-                defaults = {
-                    "homepage": "strollon://start", "startup_action": 0,
-                    "save_session": True, "search_engine": 2, "clear_on_exit": False,
-                    "do_not_track": True, "ssl_warn_dialog": True,
-                    "download_dir": str(_get_default_downloads_dir()),
-                    "ask_download": True, "enable_javascript": True,
-                    "open_pdf_in_viewer": True,
-                    "allow_fullscreen": True, "auto_load_images": True,
-                    "enable_hardware_acceleration": True, "ua_preset": 0,
-                    "ua_custom": "", "adblock_enabled": True, "theme": "Default",
-                    "chromium_custom_args": "",
-                }
-                for key, val in defaults.items():
-                    settings.setValue(key, val)
-                for key in CHROMIUM_FLAGS:
-                    settings.setValue(key, False)
-                settings.sync()
-                browser.apply_settings()
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
-
-            elif path == "/reset-allowlist" and adblock_mgr:
-                adblock_mgr.save_allowlist(list(adblock_mgr._DEFAULT_ALLOWLIST))
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
-
-            elif path == "/update-adblock" and browser:
-                _browser_ref = browser
-                def _on_done(success, message):
-                    # adblock_last_updated は managers.py 側で書き込み済み
-                    log(f"[INFO] AdBlock update: {message}")
-                    # シグナル経由でメインスレッドにリロードを委譲（スレッドセーフ）
-                    _browser_ref._reload_settings_signal.emit()
-                if adblock_mgr:
-                    adblock_mgr.update_filters(callback=_on_done)
-                html = "<html><body></body></html>"
-
-            elif path == "/browse-dir" and browser:
-                from PySide6.QtWidgets import QFileDialog
-                cur = settings.value("download_dir", "") or str(_get_default_downloads_dir())
-                directory = QFileDialog.getExistingDirectory(browser, "ダウンロードフォルダを選択", cur)
-                if directory:
-                    settings.setValue("download_dir", directory)
-                    settings.sync()
-                    browser.apply_settings()
-                html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
-
-            else:
-                # /general, /appearance, /adblock, ... などのセクションパス
-                VALID_SECTIONS = {
-                    "general","appearance","privacy","adblock",
-                    "downloads","useragent","advanced","experimental"
-                }
-                # path は "/general" → "general"
-                section = path.lstrip("/") if path.lstrip("/") in VALID_SECTIONS else "general"
-                html = _build_settings_html(
-                    settings, adblock_mgr, themes,
-                    list(USER_AGENT_PRESETS.values()),
-                    list(USER_AGENT_PRESET_NAMES),
-                    CHROMIUM_FLAGS,
-                    str(_get_default_downloads_dir()),
-                    section,
-                )
-
-        else:
-            job.fail(QWebEngineUrlRequestJob.UrlNotFound)
+        # ---- セキュリティ検証 ----
+        # 1. オリジン検証: strollon:// 内部ページへは、外部Webページからの
+        #    遷移（img/fetch/トップレベルナビゲーション問わず）を一切許可しない。
+        #    許可されるのは (a) ユーザー操作由来（アドレスバー直接入力・
+        #    ブックマーク・メニュー等で initiator が空になるケース）と
+        #    (b) strollon:// 自身からの遷移のみ。
+        if not _verify_request_origin(job):
+            _reject_job(job, "external page attempted strollon:// navigation", url)
             return
 
+        # 2. アクショントークン: 状態変更エンドポイントはオリジン検証に加えて
+        #    起動時生成のトークン一致も必須とする（二重防御）。
+        if (host, path) in _STROLLON_MUTATING_PATHS:
+            if not _verify_action_token(url):
+                _reject_job(job, "invalid/missing action token", url)
+                return
+
+        def _dispatch():
+            # ブラウザインスタンスを取得（データ参照・クリア操作に使用）
+            browser = None
+            p = self.parent()
+            while p:
+                if isinstance(p, VerticalTabBrowser):
+                    browser = p
+                    break
+                p = p.parent() if hasattr(p, 'parent') else None
+
+            if host == "welcome":
+                html = _build_welcome_html(BROWSER_VERSION_NAME, INSTALL)
+
+            elif host == "start":
+                html = _build_start_html()
+
+            elif host == "history":
+                if path == "/clear" and browser:
+                    browser.history_manager.clear_history()
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://history'></head></html>"
+                elif path == "/delete" and browser:
+                    try:
+                        from PySide6.QtCore import QUrlQuery as _QUQ
+                        hid = int(_QUQ(url.query()).queryItemValue("id", QUrl.FullyDecoded))
+                        browser.history_manager.delete_history(hid)
+                    except (ValueError, Exception):
+                        pass
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://history'></head></html>"
+                elif browser:
+                    records = browser.history_manager.get_history(500)
+                    html = _build_history_html(records)
+                else:
+                    html = _build_history_html([])
+
+            elif host == "favorites":
+                if path == "/delete" and browser:
+                    try:
+                        from PySide6.QtCore import QUrlQuery as _QUQ
+                        bid = int(_QUQ(url.query()).queryItemValue("id", QUrl.FullyDecoded))
+                        browser.bookmark_manager.delete_bookmark(bid)
+                    except (ValueError, Exception):
+                        pass
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://favorites'></head></html>"
+                elif path == "/export" and browser:
+                    html = _build_bookmarks_export_html(browser.bookmark_manager.get_bookmarks())
+                elif path == "/import" and browser:
+                    try:
+                        import base64
+                        from PySide6.QtCore import QUrlQuery as _QUQ
+                        b64 = _QUQ(url.query()).queryItemValue("data", QUrl.FullyDecoded)
+                        html_data = base64.b64decode(b64).decode("utf-8", errors="replace")
+                        _import_bookmarks_html(browser.bookmark_manager, html_data)
+                    except Exception as _e:
+                        log(f"[WARN] Bookmark import failed: {_e}")
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://favorites'></head></html>"
+                elif browser:
+                    records = browser.bookmark_manager.get_bookmarks()
+                    html = _build_favorites_html(records)
+                else:
+                    html = _build_favorites_html([])
+
+            elif host == "downloads":
+                if path == "/clear" and browser:
+                    browser.download_manager.clear_download_history()
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://downloads'></head></html>"
+                elif path == "/delete" and browser:
+                    try:
+                        from PySide6.QtCore import QUrlQuery as _QUQ
+                        did = int(_QUQ(url.query()).queryItemValue("id", QUrl.FullyDecoded))
+                        browser.download_manager.delete_download(did)
+                    except (ValueError, Exception):
+                        pass
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://downloads'></head></html>"
+                elif path == "/cancel" and browser:
+                    try:
+                        from PySide6.QtCore import QUrlQuery as _QUQ
+                        cancel_url = _QUQ(url.query()).queryItemValue("url", QUrl.FullyDecoded)
+                        for dl in browser.download_manager.get_downloads():
+                            if dl.url().toString() == cancel_url:
+                                dl.cancel()
+                                break
+                    except Exception:
+                        pass
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://downloads'></head></html>"
+                elif browser:
+                    html = _build_downloads_html(browser.download_manager)
+                else:
+                    html = _build_downloads_html(type('_DM', (), {
+                        'get_download_history': lambda s, n: [],
+                        'get_downloads': lambda s: []
+                    })())
+
+            elif host == "about":
+                html = _build_about_html(BROWSER_VERSION_NAME, INSTALL_MODE,
+                                         CONFIG_FILE, DATA_DIR, BROWSER_TARGET_ARCHITECTURE)
+
+            elif host == "settings":
+                import json as _json
+
+                adblock_mgr = getattr(browser, 'adblock_manager', None) if browser else None
+                _te = None
+                try:
+                    import theme as _theme_mod
+                    _te = _theme_mod.theme_engine
+                except Exception:
+                    pass
+                themes = _te.list_themes() if _te else ["Default"]
+
+                if path == "/save" and browser:
+                    try:
+                        from PySide6.QtCore import QUrlQuery as _QUQ
+                        _qs = _QUQ(url.query())
+                        data_enc = _qs.queryItemValue("data", QUrl.FullyDecoded)
+                        data = _json.loads(data_enc)
+                        for key, val in data.items():
+                            if key == "_allowlist":
+                                if adblock_mgr:
+                                    adblock_mgr.save_allowlist(val)
+                            else:
+                                settings.setValue(key, val)
+                        settings.sync()
+                        browser.apply_settings()
+                        log(f"[INFO] Settings saved: section={_qs.queryItemValue('section', QUrl.FullyDecoded)}")
+                    except Exception as _e:
+                        log(f"[WARN] Settings save failed: {_e}")
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
+
+                elif path == "/save-single" and browser:
+                    # 即時保存（ページ遷移なし）
+                    try:
+                        from PySide6.QtCore import QUrlQuery as _QUQ
+                        _qs = _QUQ(url.query())
+                        key = _qs.queryItemValue("key", QUrl.FullyDecoded)
+                        val_raw = _qs.queryItemValue("val", QUrl.FullyDecoded)
+                        val = _json.loads(val_raw)
+                        settings.setValue(key, val)
+                        settings.sync()
+                        browser.apply_settings()
+                        log(f"[INFO] Setting saved: {key} = {val}")
+                    except Exception as _e:
+                        log(f"[WARN] save-single failed: {_e}")
+                    html = "<html><body></body></html>"
+
+                elif path == "/save-allowlist" and adblock_mgr:
+                    try:
+                        from PySide6.QtCore import QUrlQuery as _QUQ
+                        data_enc = _QUQ(url.query()).queryItemValue("data", QUrl.FullyDecoded)
+                        new_list = _json.loads(data_enc)
+                        adblock_mgr.save_allowlist(new_list)
+                        log(f"[INFO] Allowlist saved: {len(new_list)} entries")
+                    except Exception as _e:
+                        log(f"[WARN] save-allowlist failed: {_e}")
+                    html = "<html><body></body></html>"
+
+                elif path == "/save-filter-urls" and adblock_mgr:
+                    try:
+                        from PySide6.QtCore import QUrlQuery as _QUQ
+                        data_enc = _QUQ(url.query()).queryItemValue("data", QUrl.FullyDecoded)
+                        new_urls = _json.loads(data_enc)
+                        adblock_mgr.save_filter_urls(new_urls)
+                        log(f"[INFO] Filter URLs saved: {len(new_urls)} entries")
+                    except Exception as _e:
+                        log(f"[WARN] save-filter-urls failed: {_e}")
+                    html = "<html><body></body></html>"
+
+                elif path == "/reset-filter-urls" and adblock_mgr:
+                    adblock_mgr.save_filter_urls(list(adblock_mgr._DEFAULT_FILTER_URLS))
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/adblock'></head></html>"
+
+                elif path == "/reset" and browser:
+                    defaults = {
+                        "homepage": "strollon://start", "startup_action": 0,
+                        "save_session": True, "search_engine": 2, "clear_on_exit": False,
+                        "do_not_track": True, "ssl_warn_dialog": True,
+                        "download_dir": str(_get_default_downloads_dir()),
+                        "ask_download": True, "enable_javascript": True,
+                        "open_pdf_in_viewer": True,
+                        "allow_fullscreen": True, "auto_load_images": True,
+                        "enable_hardware_acceleration": True, "ua_preset": 0,
+                        "ua_custom": "", "adblock_enabled": True, "theme": "Default",
+                        "chromium_custom_args": "",
+                    }
+                    for key, val in defaults.items():
+                        settings.setValue(key, val)
+                    for key in CHROMIUM_FLAGS:
+                        settings.setValue(key, False)
+                    settings.sync()
+                    browser.apply_settings()
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
+
+                elif path == "/reset-allowlist" and adblock_mgr:
+                    adblock_mgr.save_allowlist(list(adblock_mgr._DEFAULT_ALLOWLIST))
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
+
+                elif path == "/update-adblock" and browser:
+                    _browser_ref = browser
+                    def _on_done(success, message):
+                        # adblock_last_updated は managers.py 側で書き込み済み
+                        log(f"[INFO] AdBlock update: {message}")
+                        # シグナル経由でメインスレッドにリロードを委譲（スレッドセーフ）
+                        _browser_ref._reload_settings_signal.emit()
+                    if adblock_mgr:
+                        adblock_mgr.update_filters(callback=_on_done)
+                    html = "<html><body></body></html>"
+
+                elif path == "/browse-dir" and browser:
+                    from PySide6.QtWidgets import QFileDialog
+                    cur = settings.value("download_dir", "") or str(_get_default_downloads_dir())
+                    directory = QFileDialog.getExistingDirectory(browser, "ダウンロードフォルダを選択", cur)
+                    if directory:
+                        settings.setValue("download_dir", directory)
+                        settings.sync()
+                        browser.apply_settings()
+                    html = "<html><head><meta http-equiv='refresh' content='0;url=strollon://settings/general'></head></html>"
+
+                else:
+                    # /general, /appearance, /adblock, ... などのセクションパス
+                    VALID_SECTIONS = {
+                        "general","appearance","privacy","adblock",
+                        "downloads","useragent","advanced","experimental"
+                    }
+                    # path は "/general" → "general"
+                    section = path.lstrip("/") if path.lstrip("/") in VALID_SECTIONS else "general"
+                    html = _build_settings_html(
+                        settings, adblock_mgr, themes,
+                        list(USER_AGENT_PRESETS.values()),
+                        list(USER_AGENT_PRESET_NAMES),
+                        CHROMIUM_FLAGS,
+                        str(_get_default_downloads_dir()),
+                        section,
+                    )
+
+            else:
+                return None
+
+            return html
+
+        html = run_on_main_thread(_dispatch)
+        if html is None:
+            job.fail(QWebEngineUrlRequestJob.UrlNotFound)
+            return
         data = QByteArray(html.encode("utf-8"))
         buf  = QBuffer(job)
         buf.setData(data)
@@ -2094,7 +2302,6 @@ class StrollonSchemeHandler(QWebEngineUrlSchemeHandler):
 class AdBlockInterceptor(QWebEngineUrlRequestInterceptor):
     """
     広告ブロック + DNT ヘッダー付加を行うリクエストインターセプター。
-    旧 DntRequestInterceptor を置き換える。
     """
 
     def __init__(self, adblock_manager=None, enabled: bool = False, parent=None):
@@ -2123,8 +2330,6 @@ class AdBlockInterceptor(QWebEngineUrlRequestInterceptor):
                 info.block(True)
 
 
-# 後方互換エイリアス（万が一他モジュールから参照されている場合用）
-DntRequestInterceptor = AdBlockInterceptor
 
 
 
@@ -2229,12 +2434,25 @@ class CustomWebEnginePage(QWebEnginePage):
         return w
 
     def createWindow(self, window_type):
-        """target="_blank" / window.open() などで新タブが要求されたとき"""
-        log("[INFO] TabControl: createWindow requested")
+        """
+        target="_blank" / window.open() / 右クリック「新しいタブで開く」/
+        ポップアップウィンドウなどで新タブ・新ウィンドウが要求されたとき。
+
+        重要: このページ自身が使っているプロファイル(self._profile)が
+        incognito_profile かどうかで判定する。window_type（タブ/ウィンドウ/
+        ポップアップの別）に関わらず、シークレットモードのページから
+        呼ばれた場合は必ずシークレットタブとして開く。
+        以前はここが incognito=False 固定になっており、シークレットモードの
+        タブ・ウィンドウ・ポップアップから開いた新規タブが通常モードの
+        プロファイル（履歴・Cookie等が永続化される）に紛れ込むという
+        重大な情報漏洩バグがあった。
+        """
+        log(f"[INFO] TabControl: createWindow requested (type={window_type})")
         browser = self._find_browser()
         if browser:
+            is_incognito = self._profile is browser.incognito_profile
             web_view = browser.add_new_tab(
-                url="about:blank", activate=True, incognito=False, _return_view=True
+                url="about:blank", activate=True, incognito=is_incognito, _return_view=True
             )
             if web_view is not None:
                 return web_view.page()
@@ -2250,6 +2468,13 @@ class CustomWebEnginePage(QWebEnginePage):
         from PySide6.QtWidgets import QApplication as _App
         from PySide6.QtCore import Qt as _Qt
 
+        # mailto: は QtWebEngine が自前で描画できないため、OS既定のメールクライアントに委譲する。
+        if url.scheme().lower() == "mailto":
+            from PySide6.QtGui import QDesktopServices as _QDS
+            _QDS.openUrl(url)
+            log(f"[INFO] mailto: link delegated to default mail client: {url.toString()}")
+            return False
+
         if (
             nav_type == _Page.NavigationTypeLinkClicked
             and is_main_frame
@@ -2257,7 +2482,10 @@ class CustomWebEnginePage(QWebEnginePage):
         ):
             browser = self._find_browser()
             if browser:
-                browser.add_new_tab(url=url.toString(), activate=True)
+                # ここも createWindow と同様、呼び出し元ページのプロファイルから
+                # incognitoを正しく引き継ぐ（以前は常に通常モードになっていた）。
+                is_incognito = self._profile is browser.incognito_profile
+                browser.add_new_tab(url=url.toString(), activate=True, incognito=is_incognito)
             return False  # このページへの遷移をキャンセル
         return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
@@ -2533,6 +2761,16 @@ class VerticalTabBrowser(QMainWindow):
                     f"{download.downloadFileName()} のダウンロードを開始しました。")
         else:
             download.setDownloadDirectory(str(download_dir))
+            # 「確認する」分岐(Path(filepath).name)と同様に、サーバーが提案した
+            # ファイル名（Content-Disposition由来）から確実にベース名のみを
+            # 取り出す。悪意あるサーバーが "../../.." 等を含むファイル名を
+            # 提案してきた場合の対策（QtWebEngine側で既に基本的なサニタイズは
+            # 行われるはずだが、こちらの分岐だけ明示的な対策が抜けていたため
+            # 多層防御として追加する）。
+            safe_name = Path(filename).name.strip() if filename else ""
+            if not safe_name or safe_name in (".", ".."):
+                safe_name = "download"
+            download.setDownloadFileName(safe_name)
             download.accept()
             self.download_manager.add_download(download)
             self._connect_download_notification(download)
@@ -3529,8 +3767,15 @@ class VerticalTabBrowser(QMainWindow):
         
         return search_urls.get(search_engine, search_urls[2])  # デフォルト: duck
     
+    # file:// / ftp:// / mailto: は明示的にサポートするスキーム。
+    # これらが入力された場合、https:// を勝手に補完してはならない。
+    _EXPLICIT_SCHEMES = ("file://", "ftp://", "mailto:")
+
     def is_valid_url(self, text):
         """URL判定"""
+        if text.lower().startswith(self._EXPLICIT_SCHEMES):
+            return True
+
         url_pattern = re.compile(r'^https?://|^www\.|^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}')
         
         if ' ' in text:
@@ -3552,6 +3797,10 @@ class VerticalTabBrowser(QMainWindow):
 
         # 内部スキームはそのまま通す
         if text.startswith("strollon://"):
+            return text
+
+        # file:// / ftp:// / mailto: はそのまま通す（https:// を補完しない）
+        if text.lower().startswith(self._EXPLICIT_SCHEMES):
             return text
 
         if self.is_valid_url(text):
@@ -3967,10 +4216,10 @@ class VerticalTabBrowser(QMainWindow):
             log("[INFO] TabControl: Reopen (no history, opening homepage)")
     
     def duplicate_tab(self, item):
-        """タブを複製"""
+        """タブを複製（シークレットタブはシークレットのまま複製する）"""
         if isinstance(item, TabItem):
             url = self.display_url_for(item.web_view)
-            self.add_new_tab(url, activate=True)
+            self.add_new_tab(url, activate=True, incognito=getattr(item, "incognito", False))
             log(f"[INFO] TabControl: Duplicate - {url}")
     
     def add_bookmark_from_tab(self, item):
@@ -4019,6 +4268,17 @@ class VerticalTabBrowser(QMainWindow):
             self.adblock_manager.flush_block_count()
 
         # シークレットタブのキャッシュ・ストレージを確実に削除
+        # まずQt側APIでプロファイルの保持データを明示的にクリアしてから
+        # ディスク上のディレクトリを削除する（rmtreeだけに頼るとファイルが
+        # ロックされたままで失敗し、次回起動まで残留することがあるため、
+        # ここでの削除はあくまでベストエフォート。起動時にも同じ処理を
+        # 行い、削除漏れがあれば次回起動時に確実に消す二重の安全網にしている）。
+        try:
+            self.incognito_profile.cookieStore().deleteAllCookies()
+            self.incognito_profile.clearHttpCache()
+        except Exception as _e:
+            log(f"[WARN] Failed to clear incognito profile via Qt API: {_e}")
+
         import shutil as _shutil
         for _incognito_path in (INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH):
             try:

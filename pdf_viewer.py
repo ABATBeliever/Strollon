@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import secrets
 import shutil
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -53,6 +54,21 @@ PDF_VIEWER_HOST = "viewer"
 PDF_CACHE_SUBDIR = "pdfjs_cache"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# =====================================================================
+# キャッシュキー用ソルト（プロセス起動ごとにランダム生成・揮発性）
+# =====================================================================
+# 0.7.3.0 [1.0.0.0-rc1] で導入。
+# 以前は sha256(元URL) をそのままキャッシュキー（strollon-pdf:// のパス）に
+# 使っていたため、外部Webページが既知のPDF URLから同じダイジェストを
+# 事前計算し、strollon-pdf://viewer/data/<digest>/... へ fetch() 等で
+# アクセスを試みることで「そのPDFを開いたことがあるか」を推測できる
+# 履歴推測（history sniffing）の穴があった。
+# プロセスごとに変わる秘密のソルトをダイジェスト計算に混ぜることで、
+# 外部から事前計算・推測ができないようにする（strollon:// 側の
+# アクショントークンとは別物・別目的）。
+# =====================================================================
+_PDF_CACHE_SALT: bytes = secrets.token_bytes(32)
 
 # ---- Strollon が非表示にするツールバー要素 -----------------------------------
 # QtWebEngine のChromiumバージョンでは動作しない・または Strollon と
@@ -140,8 +156,15 @@ def pdf_cache_dir(base_cache_dir: Path) -> Path:
 
 
 def url_to_digest(url: str) -> str:
-    """URL文字列から SHA-256 hex を生成する。キャッシュキー兼逆引きキー。"""
-    return hashlib.sha256(url.encode("utf-8", errors="surrogatepass")).hexdigest()
+    """
+    URL文字列から SHA-256 hex を生成する。キャッシュキー兼逆引きキー。
+    プロセス固有のソルト(_PDF_CACHE_SALT)を混ぜることで、外部Webページが
+    既知のURLからダイジェストを事前計算して strollon-pdf://viewer/data/...
+    への到達を試み、閲覧履歴を推測することを防ぐ。
+    """
+    return hashlib.sha256(
+        _PDF_CACHE_SALT + url.encode("utf-8", errors="surrogatepass")
+    ).hexdigest()
 
 
 def cache_path_for_url(base_cache_dir: Path, url: str) -> Path:

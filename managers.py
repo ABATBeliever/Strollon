@@ -730,6 +730,14 @@ class AdBlockManager:
         errors = []
 
         for url in self.get_filter_urls():
+            # フィルターURLは http/https のみ許可する（多層防御）。
+            # 変更自体はアクショントークンで保護済みだが、file:// 等の
+            # ローカル/内部スキームを urlopen() に渡してしまう経路を
+            # そもそも塞いでおく。
+            if not (url.startswith("http://") or url.startswith("https://")):
+                errors.append(f"{url}: unsupported scheme (http/https only)")
+                self._log(f"[WARN] AdBlock: rejected non-http(s) filter URL: {url}")
+                continue
             try:
                 self._log(f"[INFO] AdBlock: downloading {url}")
                 req = Request(url, headers={"User-Agent": "Mozilla/5.0"})

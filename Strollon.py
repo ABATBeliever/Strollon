@@ -33,19 +33,28 @@ from pathlib import Path
 # プラットフォーム / アーキテクチャ定数
 # =====================================================================
 # win-x64 / win-a64 / linux-x64 / linux-a64 / rasp-a64 / mac-a64
+#
+# 0.7.3.0 [1.0.0.0-rc1] より、IS_WINDOWS / IS_LINUX は BROWSER_TARGET_ARCHITECTURE
+# の文字列から自動判定するように変更した。以前は IS_WINDOWS / IS_LINUX を
+# ビルドごとに手動で True/False を書き換えていたため、書き換え忘れによる
+# 実行時の不整合（例: Linuxビルドなのに IS_WINDOWS=True のまま）が起こり得た。
+# ビルド時に設定すべき値は BROWSER_TARGET_ARCHITECTURE 一つだけにし、
+# そこから他のフラグを一意に導出することで書き換え漏れをなくす。
 # =====================================================================
 
-IS_WINDOWS: bool = True
-IS_LINUX:   bool = False
 BROWSER_TARGET_ARCHITECTURE: str = "win-x64"
+
+_arch_lower = BROWSER_TARGET_ARCHITECTURE.lower()
+IS_WINDOWS: bool = "win" in _arch_lower
+IS_LINUX:   bool = ("linux" in _arch_lower) or ("rasp" in _arch_lower)
 
 # =====================================================================
 # ブラウザ情報
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "0.7.1.0"
-BROWSER_VERSION_NAME     = "0.7.1.0 Preview"
+BROWSER_VERSION_SEMANTIC = "0.7.4.0"
+BROWSER_VERSION_NAME     = "0.7.4.0 [1.0.0.0 rc-2]"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================
@@ -74,19 +83,19 @@ CHECK_FOR_UPDATES: bool = True
 
 USER_AGENT_PRESETS = {
     0: "",
-    1: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0",
-    2: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
-    3: "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.5615.135 Mobile Safari/537.36",
-    4: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+    1: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+    2: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0.1 Safari/605.1.15",
+    3: "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
+    4: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1",
     5: "",
 }
 
 USER_AGENT_PRESET_NAMES = [
     "デフォルト (Chromium)",
-    "Firefox 147 (Windows)",
-    "Safari 16.5 (macOS)",
-    "Chrome Mobile (Android)",
-    "Safari Mobile (iOS)",
+    "Firefox 152 (Windows)",
+    "Safari 26.0.1 (macOS)",
+    "Chrome Mobile 140 (Android)",
+    "Safari Mobile 18.6 (iOS)",
     "カスタム",
 ]
 
@@ -619,7 +628,29 @@ def main():
     except Exception as e:
         log(f"[WARN] PDF cache clear failed: {e}")
 
+    # ---- シークレットモードのキャッシュ・ストレージ残留物を起動時にも削除 ----
+    # closeEvent でも削除を試みているが、終了時点では QWebEngineProfile
+    # （Chromium側）がまだファイルハンドルを保持していることがあり、
+    # 特にWindowsではロック中のファイルが削除できず ignore_errors=True で
+    # 失敗が握りつぶされて残留することがあった。起動時（＝どの
+    # QWebEngineProfileもまだ生成されておらずファイルハンドルが一切ない
+    # タイミング）にも必ず掃除することで、削除漏れを確実に解消する。
+    import shutil as _shutil
+    for _incognito_leftover in (INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH):
+        try:
+            if _incognito_leftover.exists():
+                _shutil.rmtree(_incognito_leftover, ignore_errors=True)
+                log(f"[INFO] Incognito leftover data cleared (startup): {_incognito_leftover}")
+        except Exception as e:
+            log(f"[WARN] Incognito leftover clear failed: {e}")
+
     app = QApplication(sys.argv)
+
+    # strollon:// ハンドラ(IOスレッドから呼ばれる)がGUI操作を安全にメイン
+    # スレッドへ委譲できるよう、確実にメインスレッド上でここに初期化する。
+    from browser import init_main_thread_invoker
+    init_main_thread_invoker()
+
     font = QFont()
     font.setPointSize(8)
     app.setFont(font)
