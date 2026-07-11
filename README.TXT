@@ -1,17 +1,10 @@
 【ソフト名称】Strollon WebBrowser
-【バージョン】0.7.1.0 Preview
-【最終更新日】2026/06/29
+【バージョン】0.7.4.0 [1.0.0.0-rc2]
+【最終更新日】2026/07/11
 【 著 作 者 】ABATBeliever
 【 動作環境 】Windows10+ / Linux
 【 推奨環境 】Windows11+ / Linux (Wayland)
 【ライセンス】LGPL v3
-________________________________________________________________________________________________
-○注意
-
-　このバージョンは Preview です。
-開発中であり、不安定な可能性もあります。
-
-　X11セッションのLinuxで利用するには、追加パッケージが必要です。「追加の依存関係」を参照下さい。
 ________________________________________________________________________________________________
 ■ 概要
 
@@ -19,7 +12,6 @@ Strollon は、縦タブ対応のシンプルな モダン Web ブラウザです。
 
 Pythonベースで、Chromium エンジンを採用する LGPLライセンスの下で、
 過去のInternetStrollerシリーズの設計思想と、VELA Praxisの拡張性が合流。
-
 ________________________________________________________________________________________________
 ■ 主な機能
 
@@ -51,10 +43,11 @@ ________________________________________________________________________________
 ■ 追加の依存関係
 
 ◇LinuxのX11セッションをお使いの場合、以下のモジュールが必要です。
-　 (Debian系の場合) sudo apt install libxcb-cursor0
+　 (Debian系の場合) sudo apt install libxcb-cursor0 fuse3
 
 ◇WSL2でお使いの場合、以下のモジュールが必要です。
 　 (Debian系の場合) sudo apt install \
+  fuse3 \
   libnspr4 \
   libnss3 \
   libatk1.0-0 \
@@ -68,9 +61,21 @@ ________________________________________________________________________________
   libasound2t64 \
   libxkbcommon0 \
   libxkbfile1 \
-  libgtk-3-0   
+  libgtk-3-0 \
+  libgl1 \
+  libgl1 \
+  libglx-mesa0 \
+  libegl1 \
+  libglu1-mesa \
+  mesa-utils
+
+さらに文字化けが起こった場合は、
+  sudo apt install fonts-noto-cjk
+  sudo fc-cache -fv
 ________________________________________________________________________________________________
 ■ お問い合わせ・貢献
 
 不具合報告、要望、コントリビュート等は以下にご連絡ください。
-GitHub: [https://github.com/ABATBeliever/Strollon]
+GitHub               : [https://github.com/ABATBeliever/Strollon]
+公式ページ           : [https://abatbeliever.net/software/bin/Strollon]
+バグ・脆弱性ビューワ : [https://abatbeliever.net/bugs/?q=Strollon]
