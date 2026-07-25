@@ -94,13 +94,23 @@ class HistoryManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
+                # クエリ中の LIKE ワイルドカード（% と _）およびエスケープ文字自体を
+                # エスケープしてから ESCAPE 句を指定する。これをしないと、例えば
+                # 検索欄に "%" や "_" を含む文字列を入力した際に、意図せず
+                # ワイルドカードとして働いてしまう（不正確な検索結果につながる）。
+                escaped_query = (
+                    query.replace('\\', '\\\\')
+                         .replace('%', '\\%')
+                         .replace('_', '\\_')
+                )
+                pattern = f'%{escaped_query}%'
                 cursor.execute('''
                     SELECT id, url, title, visit_time, visit_count 
                     FROM history 
-                    WHERE url LIKE ? OR title LIKE ?
+                    WHERE url LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\'
                     ORDER BY visit_time DESC 
                     LIMIT ?
-                ''', (f'%{query}%', f'%{query}%', limit))
+                ''', (pattern, pattern, limit))
                 return cursor.fetchall()
         except sqlite3.Error as e:
             log(f"[ERROR] search_history failed: {e}")
@@ -503,23 +513,35 @@ class AdBlockManager:
     ]
 
     # QWebEngineUrlRequestInfo.ResourceType → adblock resource type 文字列
+    #
+    # 0.7.5.0 [1.0.0.0-rc3]: 以前の対応表は ResourceTypeFavicon(=12) が
+    # 抜けていたため、Xhr 以降の値がすべて1つずつズレていた
+    # （実際の Xhr=13 が誤って「ping」として判定される等）。
+    # https://doc.qt.io/qt-6/qwebengineurlrequestinfo.html の
+    # ResourceType 一覧に基づき正しい値へ修正。
     _RESOURCE_TYPE_MAP = {
         0:  "document",        # MainFrame
         1:  "subdocument",     # SubFrame
         2:  "stylesheet",      # Stylesheet
         3:  "script",          # Script
         4:  "image",           # Image
-        5:  "font",            # Font
+        5:  "font",            # FontResource
         6:  "other",           # SubResource
         7:  "object",          # Object
         8:  "media",           # Media
         9:  "other",           # Worker
         10: "other",           # SharedWorker
-        11: "xmlhttprequest",  # Xhr
-        13: "ping",            # Ping
-        14: "other",           # ServiceWorker
-        15: "csp_report",      # CspReport
-        16: "object",          # PluginResource
+        11: "other",           # Prefetch
+        12: "image",           # Favicon
+        13: "xmlhttprequest",  # Xhr
+        14: "ping",            # Ping
+        15: "other",           # ServiceWorker
+        16: "csp_report",      # CspReport
+        17: "object",          # PluginResource
+        19: "document",        # NavigationPreloadMainFrame
+        20: "subdocument",     # NavigationPreloadSubFrame
+        21: "other",           # Json
+        254: "websocket",      # WebSocket
         255: "other",          # Unknown
     }
 
@@ -534,6 +556,10 @@ class AdBlockManager:
         self._rule_count = 0
         # ブロック実績カウンター（設定ファイルから復元し累積保存）
         self._block_count: int = self._settings.value("adblock_block_count", 0, type=int)
+        # フィルター更新用バックグラウンドスレッドの追跡
+        # （終了時にこのスレッドを待たずにプロセスを終了すると、Windowsで
+        #   ヒープ破壊クラッシュの原因になり得るため）
+        self._update_thread = None
         self._load_engine()
 
     # ------------------------------------------------------------------
@@ -645,11 +671,46 @@ class AdBlockManager:
         self._settings.setValue("adblock_block_count", self._block_count)
         self._settings.sync()
 
+    def is_updating(self) -> bool:
+        """フィルター更新スレッドが実行中かどうかを返す。"""
+        return self._update_thread is not None and self._update_thread.is_alive()
+
+    def wait_for_update(self, timeout: float | None = None) -> bool:
+        """
+        実行中のフィルター更新スレッドの終了を待つ。
+        アプリ終了時（closeEvent等）に、スレッドが動いたままプロセスを
+        終了してしまうのを防ぐために呼ぶ。
+
+        戻り値: タイムアウトまでに終了した（またはそもそも実行中でなかった）ら True。
+        """
+        if self._update_thread is None:
+            return True
+        self._update_thread.join(timeout)
+        return not self._update_thread.is_alive()
+
     def update_filters(self, callback=None):
         """フィルターリストをバックグラウンドでダウンロード・再構築する。"""
         import threading
-        t = threading.Thread(target=self._download_and_rebuild, args=(callback,), daemon=True)
-        t.start()
+        if self.is_updating():
+            self._log("[WARN] AdBlock: update already in progress, ignoring request")
+            if callback:
+                callback(False, "フィルターの更新は既に実行中です")
+            return
+        # 0.7.5.0 [1.0.0.0-rc3]: 以前は daemon=True の生スレッドをどこにも
+        # 保持していなかった。このスレッドはネットワークI/O（urlopen）や
+        # adblock（Rust拡張）によるEngine構築・ファイルシリアライズという
+        # ネイティブ処理を行うため、これが実行中にアプリを終了すると
+        # Pythonインタプリタの終了処理とスレッドの動作が競合し、Windowsで
+        # ヒープ破壊クラッシュ（終了時に code 0xc0000374 が出る不具合）の
+        # 原因になっていた。
+        # daemon=False にすることで、Pythonの標準の終了処理が必ずこの
+        # スレッドの完了を待ってからインタプリタを終了するようになる上、
+        # スレッドオブジェクト自体も self._update_thread に保持し、
+        # closeEvent 側からも明示的に完了を待てるようにする。
+        self._update_thread = threading.Thread(
+            target=self._download_and_rebuild, args=(callback,), daemon=False
+        )
+        self._update_thread.start()
 
     # ------------------------------------------------------------------
     # 内部実装

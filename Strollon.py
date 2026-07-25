@@ -33,13 +33,6 @@ from pathlib import Path
 # プラットフォーム / アーキテクチャ定数
 # =====================================================================
 # win-x64 / win-a64 / linux-x64 / linux-a64 / rasp-a64 / mac-a64
-#
-# 0.7.3.0 [1.0.0.0-rc1] より、IS_WINDOWS / IS_LINUX は BROWSER_TARGET_ARCHITECTURE
-# の文字列から自動判定するように変更した。以前は IS_WINDOWS / IS_LINUX を
-# ビルドごとに手動で True/False を書き換えていたため、書き換え忘れによる
-# 実行時の不整合（例: Linuxビルドなのに IS_WINDOWS=True のまま）が起こり得た。
-# ビルド時に設定すべき値は BROWSER_TARGET_ARCHITECTURE 一つだけにし、
-# そこから他のフラグを一意に導出することで書き換え漏れをなくす。
 # =====================================================================
 
 BROWSER_TARGET_ARCHITECTURE: str = "win-x64"
@@ -53,8 +46,8 @@ IS_LINUX:   bool = ("linux" in _arch_lower) or ("rasp" in _arch_lower)
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "0.7.4.0"
-BROWSER_VERSION_NAME     = "0.7.4.0 [1.0.0.0 rc-2]"
+BROWSER_VERSION_SEMANTIC = "0.7.5.0"
+BROWSER_VERSION_NAME     = "0.7.5.0 [1.0.0.0-rc3]"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================
@@ -340,6 +333,8 @@ class StrollonSettings:
         "ua_preset":                    0,
         "ua_custom":                    "",
         "theme":                        "Default",
+        "chromium_custom_args":         "",
+        "ssl_warn_dialog":              True,
         "flag_hevc":         False,
         "flag_vaapi":        False,
         "flag_mediafound":   False,

@@ -43,6 +43,23 @@ CHROMIUM_FLAGS: dict[str, tuple[str, str]] = {
 }
 
 
+# =====================================================================
+# strollon://settings/save, /save-single から書き込むことを許可する設定キー
+# =====================================================================
+# 0.7.5.0 [1.0.0.0-rc3]: 以前は data の中身をキーの検証なしにそのまま
+# settings.setValue(key, val) していたため、strollon:// ページ内で任意の
+# JavaScriptが実行できてしまった場合（例: 履歴/お気に入り/ダウンロード一覧の
+# XSS）に、chromium_custom_args のような危険な設定まで自由に書き換え
+# られてしまう恐れがあった。ここに列挙されたキー以外は無視する。
+_STROLLON_SETTINGS_ALLOWED_KEYS = frozenset({
+    "homepage", "startup_action", "save_session", "search_engine", "clear_on_exit",
+    "do_not_track", "ssl_warn_dialog", "download_dir", "ask_download",
+    "enable_javascript", "open_pdf_in_viewer", "allow_fullscreen", "auto_load_images",
+    "enable_hardware_acceleration", "ua_preset", "ua_custom", "adblock_enabled",
+    "theme", "chromium_custom_args",
+}) | frozenset(CHROMIUM_FLAGS.keys())
+
+
 def apply_chromium_flags_from_settings():
     """
     設定ファイル (config.toml / config.ini) から各フラグの有効/無効を読み取り、有効なものだけ sys.argv に追加する。
@@ -545,25 +562,23 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
 
     <div class="content-area">
 
-      <!-- スライド 0: ようこそ -->
       <div class="slide active" id="slide0">
         <div class="slide-heading">
           <h1>Strollon Browser へようこそ</h1>
         </div>
         <p class="welcome-text">
-          このウィザードでは <b>Strollon Browser {version_name}</b> の<br>
+          <b>Strollon Browser {version_name}</b> がインストール、または更新されました。<br>
           新機能と変更点をご案内します。<br><br>
           「次へ」をクリックしてください。
         </p>
         <div class="infobox">
           <b>このブラウザについて</b><br>
-          Strollon は、縦タブ対応のシンプルな Web ブラウザです。<br><br>
+          Strollon は、縦タブ対応のオープンでシンプルな Web ブラウザです。<br><br>
           Pythonベースで、Chromium エンジンを採用する LGPL、<br>
           過去のInternetStrollerシリーズの設計思想と、VELA Praxisの拡張性を合流させた、新しいブラウザです。
         </div>
       </div>
 
-      <!-- スライド 1: アピールポイント -->
       <div class="slide" id="slide1">
         <div class="slide-heading">
           <h1>主な機能</h1>
@@ -629,7 +644,6 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
         </table>
       </div>
 
-      <!-- スライド 2: リリースノート -->
       <div class="slide" id="slide2">
         <div class="slide-heading">
           <h1>リリースノート</h1>
@@ -638,13 +652,20 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
         <div class="release-scroll">
           <h2>{version_name}</h2>
           <ul>
-            <li><span class="tag tag-new">追加</span> カラーテーマ「Soda」「Gamer」を追加しました</li>
-            <li><span class="tag tag-fix">改善</span> 内部的な改良を5箇所で行いました</li>
+            <li><span class="tag tag-fix">改善</span> シークレットタブに一部の設定が正しく反映されるよう修正</li>
+            <li><span class="tag tag-fix">改善</span> タブのタイトル表示で、Webページ側のタイトル文字列がリッチテキストとして誤解釈されないよう修正</li>
+            <li><span class="tag tag-fix">改善</span> アップデート通知に含まれる改行表示を修正</li>
+            <li><span class="tag tag-fix">改善</span> 広告ブロック機能で、フィルタルールがより正確に適用されるよう改善</li>
+            <li><span class="tag tag-fix">改善</span> 閲覧履歴の検索で、% や _ を含むキーワードが意図せずワイルドカードとして扱われる問題を修正</li>
+            <li><span class="tag tag-fix">改善</span> 新しいタブページ（strollon://start）のコードを整理</li>
+            <li><span class="tag tag-fix">改善</span> 閲覧履歴・お気に入り・ダウンロード一覧ページにおける、Reflected XSSが成立しうる脆弱性を修正</li>
+            <li><span class="tag tag-fix">改善</span> 設定保存機能（strollon://settings）の権限範囲を修正</li>
+            <li><span class="tag tag-fix">改善</span> 証明書エラー警告およびアップデート通知ダイアログで、表示内容が書き換えられうる問題を修正</li>
+            <li><span class="tag tag-del">削除</span> 使用されていなかった DownloadDialogを削除</li>
           </ul>
         </div>
       </div>
 
-      <!-- スライド 3: 完了 -->
       <div class="slide" id="slide3">
         <div class="slide-heading">
           <h1>準備完了</h1>
@@ -653,12 +674,12 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
         <table class="finish-table">
           <tr><th>バージョン</th><td>{version_name}</td></tr>
           <tr><th>インストール種別</th><td>{mode_label}</td></tr>
-          <tr><th>対応 OS</th><td>Windows 10+ / Linux (Wayland)</td></tr>
+          <tr><th>対応 OS</th><td>Windows 10+ / Linux (Wayland/X11)</td></tr>
           <tr><th>開発者</th><td>ABATBeliever</td></tr>
           <tr><th>ライセンス</th><td>GNU LGPL v3</td></tr>
         </table>
         <p style="font-size:12px; color:#333; line-height:1.7; margin-top:12px;">
-          「完了」をクリックするとスタートページが開きます。<br>
+          「完了」をクリックするとスタートページに遷移します。<br>
           このページは strollon://welcome からいつでも再表示できます。
         </p>
       </div>
@@ -676,7 +697,7 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
       <button class="btn btn-primary" id="btnNext" onclick="go(1)">次へ &#8594;</button>
     </div>
   </div>
-
+  
 </div><!-- /wizard-shell -->
 
 <script>
@@ -760,15 +781,24 @@ def _build_history_html(history_records: list) -> str:
         safe_url   = escape(url)
         safe_title = escape((title or url)[:120])
         safe_disp  = escape(url[:100] + ("…" if len(url) > 100 else ""))
+        # 危険スキーム（javascript: 等）は描画時点でクリック不能にする（favoritesと同様の防御）。
+        # URLは onclick="...('{url}')" のような文字列結合ではなく data-url 属性に
+        # 格納し、JS側は addEventListener + dataset 経由で参照する。
+        # （html.escape() は HTML属性としての脱出は防げても、その属性値がイベント
+        #   ハンドラとして「再度JSソースとして解釈される」際のクォート崩れは防げないため）
+        if _is_safe_bookmark_url(url):
+            body_open = f'<div class="entry-body" data-url="{safe_url}">'
+        else:
+            body_open = '<div class="entry-body" title="この項目は危険な可能性があります">'
         rows_html += f"""<div class="entry" id="h{history_id}">
-  <div class="entry-body" onclick="location.href='{safe_url}'">
+  {body_open}
     <div class="entry-left">
       <div class="entry-title">{safe_title}</div>
       <div class="entry-url">{safe_disp}</div>
     </div>
     <div class="entry-time">{time_str}</div>
   </div>
-  <button class="action-btn" onclick="deleteEntry('history',{history_id})" title="削除">✕</button>
+  <button class="action-btn" data-del-id="{history_id}" title="削除">✕</button>
 </div>\n"""
 
     if not rows_html:
@@ -845,6 +875,15 @@ function deleteEntry(type, id) {{
 function clearAll() {{
   if (confirm('閲覧履歴をすべて削除しますか？')) location.href = __withTok('strollon://history/clear');
 }}
+// data-url / data-del-id はサーバー側で必ずHTML属性としてエスケープ済みの値。
+// ここでは文字列結合でJSを組み立てず、dataset経由の「値」として扱うことで
+// URLに含まれ得る引用符等によるスクリプト注入を防ぐ。
+document.querySelectorAll('.entry-body[data-url]').forEach(function(el) {{
+  el.addEventListener('click', function() {{ location.href = el.dataset.url; }});
+}});
+document.querySelectorAll('.action-btn[data-del-id]').forEach(function(el) {{
+  el.addEventListener('click', function() {{ deleteEntry('history', el.dataset.delId); }});
+}});
 </script>
 </body>
 </html>"""
@@ -884,10 +923,13 @@ def _build_favorites_html(bookmark_records: list) -> str:
         for bm_id, title, url in items:
             safe_title = escape((title or url)[:120])
             safe_disp  = escape(url[:80] + ("…" if len(url) > 80 else ""))
-            # 危険スキーム（javascript: 等）は描画時点でクリック不能にする
+            # 危険スキーム（javascript: 等）は描画時点でクリック不能にする。
+            # URLは data-url 属性に格納し、JS側は addEventListener + dataset で参照する
+            # （onclick="...('{url}')" という文字列結合はhtml.escape()だけでは
+            #   イベントハンドラ内でのクォート崩れ＝スクリプト注入を防げないため使わない）。
             if _is_safe_bookmark_url(url):
                 safe_url = escape(url)
-                body_open = f'<div class="entry-body" onclick="location.href=\'{safe_url}\'">'
+                body_open = f'<div class="entry-body" data-url="{safe_url}">'
             else:
                 body_open = '<div class="entry-body" title="この項目は安全でないため開けません">'
             content_html += f"""<div class="entry" id="b{bm_id}">
@@ -895,7 +937,7 @@ def _build_favorites_html(bookmark_records: list) -> str:
     <div class="entry-title">{safe_title}</div>
     <div class="entry-url">{safe_disp}</div>
   </div>
-  <button class="action-btn" onclick="deleteBookmark({bm_id})" title="削除">✕</button>
+  <button class="action-btn" data-del-id="{bm_id}" title="削除">✕</button>
 </div>\n"""
 
     if not content_html:
@@ -970,6 +1012,14 @@ function deleteBookmark(id) {{
   if (el) el.style.opacity = '0.3';
   location.href = __withTok('strollon://favorites/delete?id=' + id);
 }}
+// data-url / data-del-id はサーバー側で必ずHTML属性としてエスケープ済みの値。
+// 文字列結合でJSを組み立てず、dataset経由の「値」として扱うことでスクリプト注入を防ぐ。
+document.querySelectorAll('.entry-body[data-url]').forEach(function(el) {{
+  el.addEventListener('click', function() {{ location.href = el.dataset.url; }});
+}});
+document.querySelectorAll('.action-btn[data-del-id]').forEach(function(el) {{
+  el.addEventListener('click', function() {{ deleteBookmark(el.dataset.delId); }});
+}});
 function doImport(input) {{
   const file = input.files[0];
   if (!file) return;
@@ -1017,7 +1067,10 @@ def _build_downloads_html(download_manager) -> str:
                 f'<div class="progress-fill" id="pf{dl_id}" style="width:{pct}%"></div></div>'
                 f'<span class="status-in-progress" id="ps{dl_id}">{pct}%</span>'
             )
-            action_btn = f'<button class="action-btn cancel-btn" onclick="cancelDownload(\'{escape(url)}\')" title="中止">■ 中止</button>'
+            # URLは onclick="...('{url}')" という文字列結合ではなく data-cancel-url 属性に
+            # 格納する（html.escape()だけではイベントハンドラ内でのクォート崩れ＝
+            # スクリプト注入を防げないため）。
+            action_btn = f'<button class="action-btn cancel-btn" data-cancel-url="{escape(url)}" title="中止">■ 中止</button>'
             url_to_id[url] = dl_id
         else:
             label = STATE_LABELS.get(state, "不明")
@@ -1040,7 +1093,7 @@ def _build_downloads_html(download_manager) -> str:
                 size_text = f"{total_bytes/(1024*1024):.1f} MB"
             else:
                 size_text = "不明"
-            action_btn = f'<button class="action-btn del-btn" onclick="deleteDownload({dl_id})" title="削除">✕</button>'
+            action_btn = f'<button class="action-btn del-btn" data-del-id="{dl_id}" title="削除">✕</button>'
 
         safe_fname = escape(filename or "")
         path_disp  = download_path or url or ""
@@ -1143,6 +1196,14 @@ function clearAll() {{
   if (confirm('完了・キャンセル・中断済みのダウンロード履歴を削除しますか？'))
     location.href = __withTok('strollon://downloads/clear');
 }}
+// data-cancel-url / data-del-id はサーバー側で必ずHTML属性としてエスケープ済みの値。
+// 文字列結合でJSを組み立てず、dataset経由の「値」として扱うことでスクリプト注入を防ぐ。
+document.querySelectorAll('.action-btn.cancel-btn[data-cancel-url]').forEach(function(el) {{
+  el.addEventListener('click', function() {{ cancelDownload(el.dataset.cancelUrl); }});
+}});
+document.querySelectorAll('.action-btn.del-btn[data-del-id]').forEach(function(el) {{
+  el.addEventListener('click', function() {{ deleteDownload(el.dataset.delId); }});
+}});
 </script>
 </body>
 </html>"""
@@ -1375,7 +1436,7 @@ def _build_about_html(browser_version_name, install_mode, config_file, data_dir,
       <div class="group">
         <div class="group-title">対応環境</div>
         <table class="about-table">
-          <tr><th>対応 OS</th><td>Windows 10+ / Linux (Wayland)</td></tr>
+          <tr><th>対応 OS</th><td>Windows 10+ / Linux (Wayland/X11)</td></tr>
           <tr><th>Python 要件</th><td>3.12 以上</td></tr>
         </table>
       </div>
@@ -1909,52 +1970,10 @@ def _build_start_html() -> str:
             background-color: #0056B3;
         }
 
-        canvas {
-            border: 1px solid #333;
-            display: none;
-            margin: 20px auto;
-        }
-
-        #scoreDisplay {
-            font-size: 18px;
-            margin-bottom: 10px;
-            display: none;
-        }
-
-        #uploadContainer {
-            margin-bottom: 20px;
-            display: none;
-            text-align: center;
-        }
-
-        input[type="file"] {
-            margin-right: 10px;
-        }
-
-        button {
-            padding: 8px 200px;
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            cursor: pointer;
-        }
-
         #online-status {
             position: fixed;
             bottom: 10px;
             right: 10px;
-        }
-
-        #gameLink {
-            position: fixed;
-            bottom: 10px;
-            left: 10px;
-            cursor: pointer;
-        }
-
-        table, th, td {
-            border: 1px #000000 solid;
-            text-align: center;
         }
 
     </style>
@@ -2165,8 +2184,10 @@ class StrollonSchemeHandler(QWebEngineUrlSchemeHandler):
                             if key == "_allowlist":
                                 if adblock_mgr:
                                     adblock_mgr.save_allowlist(val)
-                            else:
+                            elif key in _STROLLON_SETTINGS_ALLOWED_KEYS:
                                 settings.setValue(key, val)
+                            else:
+                                log(f"[WARN] Ignored unknown settings key on save: {key!r}")
                         settings.sync()
                         browser.apply_settings()
                         log(f"[INFO] Settings saved: section={_qs.queryItemValue('section', QUrl.FullyDecoded)}")
@@ -2182,10 +2203,13 @@ class StrollonSchemeHandler(QWebEngineUrlSchemeHandler):
                         key = _qs.queryItemValue("key", QUrl.FullyDecoded)
                         val_raw = _qs.queryItemValue("val", QUrl.FullyDecoded)
                         val = _json.loads(val_raw)
-                        settings.setValue(key, val)
-                        settings.sync()
-                        browser.apply_settings()
-                        log(f"[INFO] Setting saved: {key} = {val}")
+                        if key in _STROLLON_SETTINGS_ALLOWED_KEYS:
+                            settings.setValue(key, val)
+                            settings.sync()
+                            browser.apply_settings()
+                            log(f"[INFO] Setting saved: {key} = {val}")
+                        else:
+                            log(f"[WARN] Ignored unknown settings key on save-single: {key!r}")
                     except Exception as _e:
                         log(f"[WARN] save-single failed: {_e}")
                     html = "<html><body></body></html>"
@@ -2405,12 +2429,16 @@ class CustomWebEnginePage(QWebEnginePage):
         url_str = error.url().toString()
         log(f"[WARN] SSL certificate error: {url_str}")
 
+        # url_str は訪問先（=攻撃者が自由に用意できる）の値。QMessageBoxはリッチテキストを
+        # 自動判定して描画するため、エスケープせずに埋め込むと警告文の見た目を
+        # 偽装される恐れがある。
+        from html import escape as _escape
         msg = _MB()
         msg.setWindowTitle("セキュリティ警告")
         msg.setIcon(_MB.Warning)
         msg.setText(
             f"<b>この接続は安全でない可能性があります</b><br><br>"
-            f"<b>URL:</b> {url_str}<br><br>"
+            f"<b>URL:</b> {_escape(url_str)}<br><br>"
             f"証明書エラーが発生しました。自己署名証明書や期限切れの証明書の可能性があります。<br>"
             f"続行すると通信内容が第三者に傍受される危険があります。"
         )
@@ -2527,7 +2555,10 @@ class TabItemWidget(QWidget):
         layout.addWidget(self.mute_icon)
         
         # タイトルラベル
+        # ページの<title>はWeb側が自由に設定できる値なので、Qtの自動リッチテキスト
+        # 判定（Qt::AutoText）に任せず常にプレーンテキストとして表示する。
         self.title_label = QLabel(title)
+        self.title_label.setTextFormat(Qt.PlainText)
         if self._incognito:
             self.title_label.setStyleSheet(STYLES['incognito_title_label'])
         else:
@@ -2566,6 +2597,29 @@ class TabItem(QListWidgetItem):
         self.setSizeHint(self.widget.sizeHint())
         # フラグ設定（選択可能、有効）
         self.setFlags(self.flags() | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+
+def _format_update_message_html(text: str) -> str:
+    """
+    更新チェックサーバーから受け取ったメッセージをQMessageBoxのリッチテキスト
+    表示用に整形する。
+
+    ・メッセージ本体はHTMLエスケープし、サーバー応答内容によるHTMLインジェクション
+      （警告文の見た目の偽装等）を防ぐ。
+    ・ただし従来、メッセージ中の実際の改行文字や "<br>" は改行として表示される
+      想定だったため、エスケープ後にそれらだけを実際の <br> へ復元する
+      （素朴に f"...{message}..." とHTMLへ埋め込むだけでは改行が one line に潰れてしまい、
+      逆に何もエスケープしないと任意のHTMLが混入できてしまうため、両立させる）。
+    """
+    from html import escape as _escape
+    text = text or ""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    escaped = _escape(normalized)
+    escaped = escaped.replace("\n", "<br>")
+    for token in ("&lt;br&gt;", "&lt;br/&gt;", "&lt;br /&gt;",
+                  "&lt;BR&gt;", "&lt;BR/&gt;", "&lt;BR /&gt;"):
+        escaped = escaped.replace(token, "<br>")
+    return escaped
 
 
 # =====================================================================
@@ -2674,12 +2728,20 @@ class VerticalTabBrowser(QMainWindow):
             web_settings.setAttribute(QWebEngineSettings.WebGLEnabled, False)
         
         # シークレットプロファイルにも同設定を適用
+        # （以前は allow_fullscreen / auto_load_images が固定 True で、
+        #   enable_hardware_acceleration も未適用のままだったため、通常タブと
+        #   シークレットタブで挙動が食い違っていた）
         incognito_settings = self.incognito_profile.settings()
-        incognito_settings.setAttribute(QWebEngineSettings.FullScreenSupportEnabled, True)
+        incognito_settings.setAttribute(QWebEngineSettings.FullScreenSupportEnabled,
+                                       self.settings.value("allow_fullscreen", True, type=bool))
         incognito_settings.setAttribute(QWebEngineSettings.JavascriptEnabled,
                                        self.settings.value("enable_javascript", True, type=bool))
-        incognito_settings.setAttribute(QWebEngineSettings.AutoLoadImages, True)
+        incognito_settings.setAttribute(QWebEngineSettings.AutoLoadImages,
+                                       self.settings.value("auto_load_images", True, type=bool))
         incognito_settings.setAttribute(QWebEngineSettings.PdfViewerEnabled, False)
+        if not self.settings.value("enable_hardware_acceleration", True, type=bool):
+            incognito_settings.setAttribute(QWebEngineSettings.Accelerated2dCanvasEnabled, False)
+            incognito_settings.setAttribute(QWebEngineSettings.WebGLEnabled, False)
         
         # UserAgent設定
         ua_preset = self.settings.value("ua_preset", 0, type=int)
@@ -3253,14 +3315,21 @@ class VerticalTabBrowser(QMainWindow):
     def show_update_notification(self, latest_version, message):
         """更新通知（今すぐ更新 / 後で確認）"""
         from constants import BROWSER_TARGET_ARCHITECTURE
-        
+        from html import escape as _escape
+
+        # latest_version/message は更新チェックサーバーからの応答値。
+        # HTMLエスケープしてインジェクションを防ぎつつ、messageに含まれ得る
+        # 改行文字や "<br>" は意図通り改行として表示されるよう変換する。
+        safe_version = _escape(str(latest_version))
+        safe_message = _format_update_message_html(message)
+
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("更新が利用可能です")
         msg_box.setIcon(QMessageBox.Information)
-        msg_box.setText(f"<h3>Strollonの新しいバージョン ({latest_version}) が利用可能です</h3>")
+        msg_box.setText(f"<h3>Strollonの新しいバージョン ({safe_version}) が利用可能です</h3>")
         msg_box.setInformativeText(
-            f"<p>現在のバージョン: {BROWSER_VERSION_SEMANTIC}<br>最新のバージョン: {latest_version}</p>"
-            f"<p><b>更新内容:</b></p><p>{message}</p>"
+            f"<p>現在のバージョン: {_escape(BROWSER_VERSION_SEMANTIC)}<br>最新のバージョン: {safe_version}</p>"
+            f"<p><b>更新内容:</b></p><p>{safe_message}</p>"
         )
         
         update_btn = msg_box.addButton("今すぐ更新", QMessageBox.AcceptRole)
@@ -4267,6 +4336,25 @@ class VerticalTabBrowser(QMainWindow):
         if hasattr(self, "adblock_manager"):
             self.adblock_manager.flush_block_count()
 
+        # バックグラウンドスレッドが実行中のままプロセスを終了すると、
+        # ネットワークI/OやRust拡張のネイティブ処理と後始末が競合し、
+        # Windowsでヒープ破壊クラッシュ（終了時に code 0xc0000374 が
+        # コンソールに出る不具合）の原因になっていたため、ここで完了を待つ。
+        if hasattr(self, "adblock_manager") and self.adblock_manager.is_updating():
+            log("[INFO] AdBlockフィルター更新の完了を待っています...")
+            if not self.adblock_manager.wait_for_update(timeout=15.0):
+                log("[WARN] AdBlockフィルター更新が15秒以内に終わらなかったため、"
+                    "完了を待たずに終了処理を続行します")
+
+        if hasattr(self, "update_checker") and self.update_checker.isRunning():
+            # QThreadは実行中に破棄されるとクラッシュしうるため、
+            # ウィンドウ（延いてはこのオブジェクトへの参照）が消える前に
+            # 必ず終了を待つ。
+            log("[INFO] 更新チェックの完了を待っています...")
+            if not self.update_checker.wait(5000):
+                log("[WARN] 更新チェックが5秒以内に終わらなかったため、"
+                    "完了を待たずに終了処理を続行します")
+
         # シークレットタブのキャッシュ・ストレージを確実に削除
         # まずQt側APIでプロファイルの保持データを明示的にクリアしてから
         # ディスク上のディレクトリを削除する（rmtreeだけに頼るとファイルが
@@ -4294,5 +4382,69 @@ class VerticalTabBrowser(QMainWindow):
             log("[INFO] PDF cache cleared (shutdown)")
         except Exception as _e:
             log(f"[WARN] Failed to clear PDF cache: {_e}")
+
+        # ------------------------------------------------------------------
+        # 全タブの QWebEngineView / QWebEnginePage を、共有プロファイル
+        # (self.profile / self.incognito_profile) より確実に先に破棄する。
+        #
+        # web_view は生成時にQtの親を持たず、非アクティブタブは
+        # on_tab_changed() で setParent(None) されるため、常にQtの
+        # ウィジェット階層から外れた状態になっている。プロファイル自体も
+        # 親を持たない。そのため、ここで明示的に順序を制御しないと、
+        # ウィンドウを閉じた後 Python のガベージコレクタが不定な順序で
+        # 解放することになり、「使用中の QWebEnginePage より先に
+        # QWebEngineProfile が破棄される」状態が起こり得た。
+        # これは Qt WebEngine で既知のクラッシュ要因であり、Windows終了時に
+        # 発生していたヒープ破壊クラッシュ（STATUS_HEAP_CORRUPTION /
+        # code 0xc0000374）の主因と考えられる。
+        # ここで「全ビュー・ページの破棄 → プロファイルの破棄」の順序を
+        # 明示的に保証する。
+        # ------------------------------------------------------------------
+        try:
+            for i in reversed(range(self.web_layout.count())):
+                _w = self.web_layout.itemAt(i).widget()
+                if _w:
+                    self.web_layout.removeWidget(_w)
+
+            for i in range(self.tab_list.count()):
+                _item = self.tab_list.item(i)
+                if hasattr(_item, "web_view") and _item.web_view is not None:
+                    try:
+                        _item.web_view.stop()
+                        _item.web_view.deleteLater()
+                    except Exception as _e:
+                        log(f"[WARN] Failed to tear down a tab view: {_e}")
+                    _item.web_view = None
+
+            self.tabs.clear()
+            self._zoom_levels.clear()
+
+            # deleteLater() で予約した破棄を実際に処理させる。
+            # QWebEngineView/Page の破棄はレンダラープロセスの終了通知など
+            # 非同期処理を伴うため、1〜2回の processEvents() では
+            # 処理しきれないことがある。複数回イベントループを回して猶予を与える。
+            for _ in range(20):
+                QApplication.processEvents()
+
+            # 0.7.5.0 [1.0.0.0-rc3]: 以前はここで self.profile = None のように
+            # Pythonの参照を直接手放していた。参照カウントが0になった時点で
+            # PySide6がその場で「同期的に」QWebEngineProfileのC++デストラクタを
+            # 呼び出してしまうため、Chromium側でプロファイルに配送中の
+            # 内部イベント（IPCコールバック等）と競合し、実際にこの行が
+            # クラッシュ発生位置として報告された。
+            # QObjectは「処理中のイベントがある状態で直接deleteするとクラッシュ
+            # しうる」ため、直接の参照解放ではなく deleteLater() を使い、
+            # Qt自身のイベントループに則った安全な経路で破棄する。
+            _profile, self.profile = self.profile, None
+            _incognito_profile, self.incognito_profile = self.incognito_profile, None
+            if _profile is not None:
+                _profile.deleteLater()
+            if _incognito_profile is not None:
+                _incognito_profile.deleteLater()
+
+            for _ in range(20):
+                QApplication.processEvents()
+        except Exception as _e:
+            log(f"[WARN] Failed to tear down tabs/profiles cleanly: {_e}")
 
         event.accept()

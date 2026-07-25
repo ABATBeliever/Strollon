@@ -1,6 +1,6 @@
 """
 Strollon Browser - ダイアログ類
-ブックマーク追加・ダウンロードマネージャー・ページ保存・ページ内検索
+ブックマーク追加・ページ保存・ページ内検索
 """
 
 import sys
@@ -10,10 +10,8 @@ from PySide6.QtCore import Qt, Signal, QTimer, Slot
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit,
     QLabel, QFrame, QMessageBox, QRadioButton, QGroupBox, QComboBox,
-    QFileDialog, QProgressBar, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QFormLayout,
+    QFileDialog, QProgressBar, QFormLayout,
 )
-from PySide6.QtWebEngineCore import QWebEngineDownloadRequest, QWebEnginePage
 
 from constants import (
     STYLES, BROWSER_NAME, log,
@@ -121,73 +119,6 @@ class AddBookmarkDialog(QDialog):
     
     def get_result(self):
         return self.result_data
-
-
-# =====================================================================
-# メインダイアログ（統合）
-# =====================================================================
-
-class DownloadDialog(QDialog):
-    """ダウンロードマネージャーダイアログ"""
-    
-    def __init__(self, download_manager, parent=None):
-        super().__init__(parent)
-        self.download_manager = download_manager
-        self.setWindowTitle("ダウンロードマネージャー")
-        self.setMinimumSize(700, 400)
-        self.init_ui()
-    
-    def init_ui(self):
-        self.setStyleSheet(STYLES['dialog'])
-        layout = QVBoxLayout(self)
-        
-        self.download_table = QTableWidget()
-        self.download_table.setColumnCount(4)
-        self.download_table.setHorizontalHeaderLabels(["ファイル名", "URL", "進捗", "状態"])
-        self.download_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.download_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.download_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        layout.addWidget(self.download_table)
-        
-        button_layout = QHBoxLayout()
-        
-        refresh_btn = QPushButton("更新")
-        refresh_btn.setStyleSheet(STYLES['button_secondary'])
-        refresh_btn.clicked.connect(self.refresh_downloads)
-        button_layout.addWidget(refresh_btn)
-        
-        button_layout.addStretch()
-        
-        close_btn = QPushButton("閉じる")
-        close_btn.setStyleSheet(STYLES['button_primary'])
-        close_btn.clicked.connect(self.close)
-        button_layout.addWidget(close_btn)
-        
-        layout.addLayout(button_layout)
-        
-        self.refresh_downloads()
-    
-    def refresh_downloads(self):
-        downloads = self.download_manager.get_downloads()
-        self.download_table.setRowCount(len(downloads))
-        
-        for i, download in enumerate(downloads):
-            self.download_table.setItem(i, 0, QTableWidgetItem(download.downloadFileName()))
-            self.download_table.setItem(i, 1, QTableWidgetItem(download.url().toString()))
-            
-            progress = QProgressBar()
-            progress.setValue(int(download.receivedBytes() / max(download.totalBytes(), 1) * 100))
-            self.download_table.setCellWidget(i, 2, progress)
-            
-            state_map = {
-                QWebEngineDownloadRequest.DownloadRequested: "要求中",
-                QWebEngineDownloadRequest.DownloadInProgress: "ダウンロード中",
-                QWebEngineDownloadRequest.DownloadCompleted: "完了",
-                QWebEngineDownloadRequest.DownloadCancelled: "キャンセル",
-                QWebEngineDownloadRequest.DownloadInterrupted: "中断"
-            }
-            state = state_map.get(download.state(), "不明")
-            self.download_table.setItem(i, 3, QTableWidgetItem(state))
 
 
 # =====================================================================
