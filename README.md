@@ -1,8 +1,8 @@
 # Strollon WebBrowser - インターネットを散歩しよう
 
 ![License](https://img.shields.io/badge/license-LGPLv3-blue.svg)
-![Version](https://img.shields.io/badge/version-0.7.5.0-green.svg)
-![Status](https://img.shields.io/badge/status-1.0.0.0--rc3-orange.svg)
+![Version](https://img.shields.io/badge/version-1.0.0.0-green.svg)
+![Status](https://img.shields.io/badge/status-Stable-orange.svg)
 ![Language](https://img.shields.io/badge/Language-Python-yellow.svg)
 
 ---
@@ -18,7 +18,7 @@ Pythonベースで、Chromium エンジンを採用する LGPLライセンスの
 
 ## 入手・ダウンロード
 
-準備中
+[こちら](https://abatbeliever.net/software/bin/Strollon/)
 
 ---
 

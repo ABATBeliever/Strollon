@@ -46,8 +46,8 @@ IS_LINUX:   bool = ("linux" in _arch_lower) or ("rasp" in _arch_lower)
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "0.7.5.0"
-BROWSER_VERSION_NAME     = "0.7.5.0 [1.0.0.0-rc3]"
+BROWSER_VERSION_SEMANTIC = "1.0.0.0"
+BROWSER_VERSION_NAME     = "1.0.0.0 Stable"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================

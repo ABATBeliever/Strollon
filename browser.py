@@ -650,18 +650,9 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
           <p>Version {version_name} の変更内容です。</p>
         </div>
         <div class="release-scroll">
-          <h2>{version_name}</h2>
+          <h2>1.0.0.0 Stable</h2>
           <ul>
-            <li><span class="tag tag-fix">改善</span> シークレットタブに一部の設定が正しく反映されるよう修正</li>
-            <li><span class="tag tag-fix">改善</span> タブのタイトル表示で、Webページ側のタイトル文字列がリッチテキストとして誤解釈されないよう修正</li>
-            <li><span class="tag tag-fix">改善</span> アップデート通知に含まれる改行表示を修正</li>
-            <li><span class="tag tag-fix">改善</span> 広告ブロック機能で、フィルタルールがより正確に適用されるよう改善</li>
-            <li><span class="tag tag-fix">改善</span> 閲覧履歴の検索で、% や _ を含むキーワードが意図せずワイルドカードとして扱われる問題を修正</li>
-            <li><span class="tag tag-fix">改善</span> 新しいタブページ（strollon://start）のコードを整理</li>
-            <li><span class="tag tag-fix">改善</span> 閲覧履歴・お気に入り・ダウンロード一覧ページにおける、Reflected XSSが成立しうる脆弱性を修正</li>
-            <li><span class="tag tag-fix">改善</span> 設定保存機能（strollon://settings）の権限範囲を修正</li>
-            <li><span class="tag tag-fix">改善</span> 証明書エラー警告およびアップデート通知ダイアログで、表示内容が書き換えられうる問題を修正</li>
-            <li><span class="tag tag-del">削除</span> 使用されていなかった DownloadDialogを削除</li>
+            <li><span class="tag tag-fix">改善</span> このバージョン以降、Strollonに生じたバグや脆弱性はレポートとしてASI Interfaceに収録されるようになります</li>
           </ul>
         </div>
       </div>
