@@ -5,6 +5,9 @@
 ![Status](https://img.shields.io/badge/status-Stable-orange.svg)
 ![Language](https://img.shields.io/badge/Language-Python-yellow.svg)
 
+<img width="1194" height="825" alt="スクリーンショット 2026-07-28 170724" src="https://github.com/user-attachments/assets/695c5c00-812c-4953-a31a-a6bd5a5b7533" />
+
+
 ---
 
 ## 概要
@@ -47,6 +50,8 @@ Qt WebEngine (Chromium ベース) により現代的なサイトを快適に閲�
 
 ### XDG準拠
 XDGに準拠、またはポータブルもOK
+
+<img width="1206" height="772" alt="image" src="https://github.com/user-attachments/assets/19bac84b-a6c2-4353-927d-ff5ade2ac2ad" />
 
 ---
 
