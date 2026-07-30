@@ -132,7 +132,13 @@ def _register_strollon_scheme():
         QWebEngineUrlScheme.SecureScheme |
         QWebEngineUrlScheme.LocalScheme |
         QWebEngineUrlScheme.LocalAccessAllowed |
-        QWebEngineUrlScheme.ContentSecurityPolicyIgnored
+        QWebEngineUrlScheme.ContentSecurityPolicyIgnored |
+        # 1.0.1.0: 内部ページの「即時保存」処理を img.src 頼みの発火から
+        # fetch() ベースに置き換えるために追加（strollon-pdf:// と同じ理由）。
+        # CorsEnabled/FetchApiAllowed が無いと、custom scheme に対する
+        # fetch()/XHR がそもそも許可されない。
+        QWebEngineUrlScheme.CorsEnabled |
+        QWebEngineUrlScheme.FetchApiAllowed
     )
     QWebEngineUrlScheme.registerScheme(scheme)
 
@@ -650,6 +656,10 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
           <p>Version {version_name} の変更内容です。</p>
         </div>
         <div class="release-scroll">
+          <h2>1.0.1.0 Stable</h2>
+          <ul>
+            <li><span class="tag tag-fix">改善</span> JavaScriptと画像の設定に関する4つのバグ(ASI-0003,0005,0007,0009)を修正しました。</li>
+          </ul>
           <h2>1.0.0.0 Stable</h2>
           <ul>
             <li><span class="tag tag-fix">改善</span> このバージョン以降、Strollonに生じたバグや脆弱性はレポートとしてASI Interfaceに収録されるようになります</li>
@@ -1726,6 +1736,15 @@ const uaPresetCount  = INIT.ua_preset_count;
 const defaultFilterUrls = INIT.default_filter_urls;
 const __ST = INIT.action_token;
 function __withTok(u) {{ return u + (u.includes('?') ? '&' : '?') + '_t=' + encodeURIComponent(__ST); }}
+// 1.0.1.0: 「画像を自動的に読み込む」設定がOFFのとき、new Image()を使った
+// 発火専用リクエストはBlinkの画像読み込みポリシーによって送信自体が
+// 抑止され、strollon://側に一切届かなくなる(ログにも出ない)。
+// これは即時保存(saveSetting/updateFilters/renderFilterUrls/renderAllowlist)
+// が軒並み無反応になる原因だった。img.src の代わりに fetch() を使うことで、
+// 画像読み込み設定の影響を受けずにリクエストを送れるようにする。
+function __fireStrollon(u) {{
+  fetch(u, {{ cache: 'no-store' }}).catch(function() {{ /* 結果は使わない */ }});
+}}
 
 // --- adblock情報の即時表示 ---
 (function() {{
@@ -1766,9 +1785,8 @@ showSection(INIT.active_section || 'general');
 function saveSetting(key, value, type) {{
   if (type === 'int')  value = parseInt(value);
   if (type === 'bool') value = (value === true || value === 'true');
-  const img = new Image();
-  img.src = __withTok('strollon://settings/save-single?key='
-    + encodeURIComponent(key) + '&val=' + encodeURIComponent(JSON.stringify(value)));
+  __fireStrollon(__withTok('strollon://settings/save-single?key='
+    + encodeURIComponent(key) + '&val=' + encodeURIComponent(JSON.stringify(value))));
 }}
 function wireAll() {{
   document.querySelectorAll('[data-key]').forEach(el => {{
@@ -1803,8 +1821,7 @@ onUaPresetChanged(document.getElementById('ua-preset').value);
 function updateFilters(btn) {{
   btn.disabled = true;
   btn.textContent = 'ダウンロード中...';
-  const img = new Image();
-  img.src = __withTok('strollon://settings/update-adblock');
+  __fireStrollon(__withTok('strollon://settings/update-adblock'));
   // Python側の完了コールバックがページをリロードするため、JSでの後処理は不要
 }}
 
@@ -1830,8 +1847,7 @@ function renderFilterUrls() {{
       list.appendChild(div);
     }});
   }}
-  const img = new Image();
-  img.src = __withTok('strollon://settings/save-filter-urls?data=' + encodeURIComponent(JSON.stringify(filterUrls)));
+  __fireStrollon(__withTok('strollon://settings/save-filter-urls?data=' + encodeURIComponent(JSON.stringify(filterUrls))));
 }}
 function addFilterUrl() {{
   const inp = document.getElementById('filter-url-input');
@@ -1876,8 +1892,7 @@ function renderAllowlist() {{
       list.appendChild(div);
     }});
   }}
-  const img = new Image();
-  img.src = __withTok('strollon://settings/save-allowlist?data=' + encodeURIComponent(JSON.stringify(allowlist)));
+  __fireStrollon(__withTok('strollon://settings/save-allowlist?data=' + encodeURIComponent(JSON.stringify(allowlist))));
 }}
 function addAllowlist() {{
   const inp = document.getElementById('al-input');
@@ -2385,6 +2400,42 @@ class UrlLineEdit(QLineEdit):
 
 
 # =====================================================================
+# 1.0.1.0 バグ修正: strollon:// 内部ページのJavaScript依存対策
+# =====================================================================
+# strollon://history, strollon://favorites, strollon://downloads,
+# strollon://settings 等の内部ページは、項目クリック・削除・検索絞り込み・
+# 設定保存に至るまで実装が全面的にJavaScriptに依存しており、
+# <noscript> やプレーンな <a href> によるフォールバックを持たない。
+#
+# ところが enable_javascript 設定は apply_settings() でプロファイル単位
+# (self.profile.settings() / self.incognito_profile.settings()) に
+# 適用されるため、ユーザーがJavaScriptを無効化すると、これら内部ページも
+# 巻き添えで一切操作できなくなってしまう。設定画面の保存処理自体もJS
+# 経由のため、アプリのUIからは元に戻す手段がなく config.ini の直接編集
+# でしか復旧できない、という詰みが発生していた。
+#
+# 対策として、QWebEnginePage は自分専用の QWebEngineSettings を持ち、
+# 個別の属性をプロファイル既定値に対して上書きできる(未設定の属性は
+# プロファイル側にフォールバックする)ことを利用する。表示中のURLの
+# スキームが strollon:// のときだけ、そのページに限って
+# JavascriptEnabled を強制的に有効化し、それ以外の通常のWebページでは
+# resetAttribute() でプロファイル既定値（=ユーザーの enable_javascript
+# 設定）に委ねる。
+#
+# strollon:// は自プロセスが生成する信頼済みコンテンツであり、既に
+# オリジン検証(_verify_request_origin)とアクショントークン(_t)で
+# 保護されているため、この内部ページに限ってJavaScriptを常時有効化
+# しても新たな攻撃面は生まれない。一方、通常のWebサイトについては
+# ユーザーの enable_javascript 設定がこれまで通りそのまま効く。
+#
+# 備考: strollon-pdf://（pdf.js ビューア）も実装上は同種の問題を
+# 抱えているが、1.0.1.0 では報告された不具合（設定/履歴/ダウンロード/
+# ブックマーク）の修正にとどめ、対象に含めない。
+# =====================================================================
+_ALWAYS_JS_SCHEMES = {"strollon"}
+
+
+# =====================================================================
 # カスタムWebEnginePage
 # =====================================================================
 
@@ -2400,6 +2451,47 @@ class CustomWebEnginePage(QWebEnginePage):
         self.featurePermissionRequested.connect(self._deny_permission)
         # SSL証明書エラー
         self.certificateError.connect(self._handle_certificate_error)
+        # 1.0.1.0: strollon:// 内部ページはJS無効設定の影響を受けないようにする
+        # None = 未確定（初回の_sync呼び出しで必ず一度は設定させるための番兵値）
+        self._js_force_state = None
+        self.urlChanged.connect(self._sync_javascript_for_url)
+
+    def _sync_javascript_for_url(self, url: QUrl):
+        """
+        表示中URLのスキームに応じて、このページ単位でJavascriptEnabled属性を
+        上書き/リセットする。
+
+          - strollon:// → 常に有効化する（プロファイル既定値を上書き）。
+            設定/履歴/ダウンロード/ブックマークの各内部ページはJS前提の
+            実装のため、ユーザーがJavaScriptを無効化していても機能し
+            続ける必要がある。
+          - それ以外（通常のWebページ）→ resetAttribute() でプロファイル
+            既定値（=ユーザーが選んだ enable_javascript 設定）にそのまま
+            従わせる。
+
+        タブ内で strollon:// ⇔ 通常のWebページを行き来するたびに
+        urlChanged 経由で呼ばれるため、都度正しい状態に切り替わる。
+
+        1.0.1.0 追記: strollon://settings はセクション切り替えのたびに
+        history.replaceState() で「同一ドキュメント内でURLだけ書き換える」
+        遷移を行っており、これも urlChanged を発火させる。パス（セクション）
+        が変わるだけでスキームは strollon のまま変化しない場合にまで
+        setAttribute() を呼び直すのは不要な上、settings/save-single の
+        送信に使っている change イベントリスナー登録（wireAll()）の直前で
+        毎回 WebPreferences の再送を挟むことになり、設定保存が反映されない
+        不具合の原因になっていた。実際に「強制すべきか否か」の状態が
+        変わった場合にのみ setAttribute/resetAttribute を呼ぶよう変更する。
+        """
+        should_force = url.scheme().lower() in _ALWAYS_JS_SCHEMES
+        if should_force == self._js_force_state:
+            return  # 状態に変化がなければ何もしない（同一スキーム内の遷移など）
+
+        page_settings = self.settings()
+        if should_force:
+            page_settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
+        else:
+            page_settings.resetAttribute(QWebEngineSettings.JavascriptEnabled)
+        self._js_force_state = should_force
 
     def _deny_permission(self, url, feature):
         """カメラ・マイク・位置情報などのパーミッション要求を常に拒否する。"""
@@ -3896,6 +3988,11 @@ class VerticalTabBrowser(QMainWindow):
         # new_tab_requested は createWindow 経由では使わないが、
         # JavaScript の window.open() など他の経路で発火することがある。
         # ただし二重タブ防止のため接続しない（createWindow が直接タブを作る）。
+
+        # 1.0.1.0: 初回ナビゲーション(setUrl)がurlChangedを発火するより前に、
+        # 表示予定URLに応じたJS設定を確定させておく（strollon://を開いた
+        # 最初のタブでもJSが確実に有効な状態でHTMLの解釈が始まるようにする）。
+        page._sync_javascript_for_url(QUrl(url))
 
         web_view.setPage(page)
         web_view.setUrl(QUrl(url))

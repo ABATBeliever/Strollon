@@ -4,7 +4,7 @@
 ; (Recommend: 6.7.1)
 ; Do not locate in non-ASCII Path
 #define MyAppName "Strollon WebBrowser"
-#define MyAppVersion "1.0.0.0"
+#define MyAppVersion "1.0.1.0"
 #define MyAppPublisher "ABATBeliever"
 #define MyAppURL "https://abatbeliever.net/software/bin/Strollon"
 #define MyAppExeName "Strollon.exe"
