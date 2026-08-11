@@ -656,6 +656,10 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
           <p>Version {version_name} の変更内容です。</p>
         </div>
         <div class="release-scroll">
+          <h2>1.0.2.0 Stable</h2>
+          <ul>
+            <li><span class="tag tag-fix">改善</span> 起動時・終了時に関する2つのバグ(ASI-0008,0010)を修正しました。</li>
+          </ul>
           <h2>1.0.1.0 Stable</h2>
           <ul>
             <li><span class="tag tag-fix">改善</span> JavaScriptと画像の設定に関する4つのバグ(ASI-0003,0005,0007,0009)を修正しました。</li>
@@ -2720,6 +2724,8 @@ class VerticalTabBrowser(QMainWindow):
         self.tabs = []
         self._closed_tab_stack = []  # 閉じたタブのURLスタック（複数対応）
         self._zoom_levels = {}  # タブごとのズーム倍率 {web_view: float}
+        # 1.0.2.0: closeEvent()の多重実行（再入）を防ぐためのフラグ。
+        self._is_closing = False
 
         # シグナルをスロットに接続（必ずメインスレッドで実行される）
         self._reload_settings_signal.connect(self._reload_settings_tab_slot)
@@ -3167,19 +3173,46 @@ class VerticalTabBrowser(QMainWindow):
         main_layout.addWidget(splitter)
     
     def restore_session(self):
-        """セッションを復元。初回起動時・更新時はウェルカムページを表示する。"""
+        """セッションを復元。初回起動時・更新時はウェルカムページを追加で表示する。"""
 
-        # 初回起動 or バージョン更新: ウェルカムページを開く
+        # 初回起動 or バージョン更新: ウェルカムページを表示する
         if IS_FIRST_RUN or IS_UPDATED:
             reason = "初回起動" if IS_FIRST_RUN else "バージョン更新"
             log(f"[INFO] {reason}: ウェルカムページを表示します")
+
+            # 1.0.2.0: 以前はここで無条件に return していたため、バージョン
+            # 更新時に起動時設定が「前回のタブを復元する」になっていても
+            # 保存済みセッションが一切開かれず、さらにその後の終了時に
+            # save_current_session() が「ウェルカムページ1枚だけ」の状態で
+            # 上書き保存してしまい、以前のタブ情報が完全に失われていた
+            # （ASI-0005）。
+            # 更新時（初回起動は対象外＝そもそも復元するセッションが無い）は、
+            # 起動時設定が「前回のタブを復元する」であれば、まず保存済みの
+            # タブを非アクティブで復元し、その上でウェルカムページを追加の
+            # タブとして開いて選択状態にする。
+            restored_any = False
+            if not IS_FIRST_RUN:
+                startup_action = self.settings.value("startup_action", 0, type=int)
+                if startup_action == 0 and self.settings.value("save_session", True, type=bool):
+                    status, session_data = self.session_manager.load_session()
+                    if status == "ok" and session_data:
+                        for tab_data in session_data.get("tabs", []):
+                            url = tab_data.get("url", "")
+                            if not url or url.startswith("about:") or url.startswith("chrome:"):
+                                continue
+                            self.add_new_tab(url, activate=False)
+                            restored_any = True
+
             self.add_new_tab("strollon://welcome", activate=True)
+            if restored_any:
+                log("[INFO] 更新前のセッションをウェルカムページと一緒に復元しました")
+
             # sync() は main() で既に呼ばれているが、
             # ここでも呼んで確実に新バージョンをファイルへ書き込む
             # （次回起動時に IS_UPDATED が False になることを保証する）
             self.settings.sync()
             # 初回起動時: フィルタファイルが未取得であれば自動ダウンロード開始
-            if IS_FIRST_RUN and hasattr(self, "adblock_manager")                     and not self.adblock_manager._filter_path.exists():
+            if IS_FIRST_RUN and hasattr(self, "adblock_manager") and not self.adblock_manager._filter_path.exists():
                 log("[INFO] AdBlock: 初回起動のためフィルターを自動ダウンロードします")
                 self.adblock_manager.update_filters()
             return
@@ -3678,7 +3711,10 @@ class VerticalTabBrowser(QMainWindow):
         """strollon://settings タブをメインスレッドでリロードするスロット。"""
         for i in range(self.tab_list.count()):
             item = self.tab_list.item(i)
-            if hasattr(item, 'web_view') and item.web_view.url().toString().startswith("strollon://settings"):
+            # 1.0.2.0: 終了処理中は item.web_view が None 化されていることが
+            # あるため（ASI-0004系）、hasattr だけでなく None チェックも行う。
+            if (hasattr(item, 'web_view') and item.web_view is not None
+                    and item.web_view.url().toString().startswith("strollon://settings")):
                 item.web_view.reload()
                 break
 
@@ -3696,7 +3732,7 @@ class VerticalTabBrowser(QMainWindow):
         target = "strollon://downloads"
         for i in range(self.tab_list.count()):
             item = self.tab_list.item(i)
-            if isinstance(item, TabItem):
+            if isinstance(item, TabItem) and item.web_view is not None:
                 if item.web_view.url().toString().startswith(target):
                     item.web_view.reload()
                     self.tab_list.setCurrentItem(item)
@@ -3738,7 +3774,8 @@ class VerticalTabBrowser(QMainWindow):
         target = "strollon://downloads"
         for i in range(self.tab_list.count()):
             item = self.tab_list.item(i)
-            if isinstance(item, TabItem) and item.web_view.url().toString().startswith(target):
+            if (isinstance(item, TabItem) and item.web_view is not None
+                    and item.web_view.url().toString().startswith(target)):
                 js = f"if(typeof updateProgress==='function')updateProgress({json.dumps(updates)});"
                 item.web_view.page().runJavaScript(js)
                 break
@@ -3748,7 +3785,8 @@ class VerticalTabBrowser(QMainWindow):
         target = "strollon://downloads"
         for i in range(self.tab_list.count()):
             item = self.tab_list.item(i)
-            if isinstance(item, TabItem) and item.web_view.url().toString().startswith(target):
+            if (isinstance(item, TabItem) and item.web_view is not None
+                    and item.web_view.url().toString().startswith(target)):
                 item.web_view.reload()
                 break
 
@@ -4124,6 +4162,10 @@ class VerticalTabBrowser(QMainWindow):
 
         # ----- 通常の Web タブ -----
         web_view = tab_item.web_view
+        # 1.0.2.0: 終了処理中に破棄済み（web_view=None化済み）のタブへの
+        # 遅延イベントが飛んできても静かに無視する（ASI-0004の保険）。
+        if web_view is None:
+            return
         self.web_layout.addWidget(web_view)
         web_view.show()
 
@@ -4337,6 +4379,10 @@ class VerticalTabBrowser(QMainWindow):
         """指定されたタブアイテムを閉じる"""
         if not isinstance(item, TabItem):
             return
+        # 1.0.2.0: 終了処理中に破棄済み（web_view=None化済み）のタブへの
+        # 遅延イベントが飛んできても静かに無視する（ASI-0004の保険）。
+        if item.web_view is None:
+            return
         
         # タブが1つしかない場合はブラウザを閉じる
         if self.tab_list.count() == 1:
@@ -4413,8 +4459,55 @@ class VerticalTabBrowser(QMainWindow):
             self.close_tab_by_item(current_item)
     
 
+    def _wait_pumping_events(self, still_running_fn, timeout: float) -> bool:
+        """
+        1.0.2.0: still_running_fn() が True を返す間、Qtのイベントループを
+        回しながらポーリング待機するヘルパー。
+
+        thread.join(timeout) や QThread.wait(ms) は呼び出し元スレッド
+        （＝GUIスレッド）を完全にブロックしてしまい、その間ウィンドウが
+        「応答なし」になる。すると待機中にユーザーが行った操作（タブ切替・
+        タブを閉じる等）がイベントキューに溜まったまま処理されず、待機後の
+        後始末処理でタブが破棄された「後」にまとめて処理されてしまい、
+        既に破棄済みのタブを参照するハンドラが例外を起こす不具合があった
+        （ASI-0004）。
+
+        ここでは短い間隔で processEvents() を挟みながら待つことで、待機中も
+        ウィンドウを常に応答可能な状態に保ち、ユーザー操作をその場で
+        正常に処理できるようにする。
+
+        戻り値: timeout秒以内に still_running_fn() が False になれば True、
+                タイムアウトした場合は False。
+        """
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while still_running_fn():
+            if _time.monotonic() >= deadline:
+                return False
+            QApplication.processEvents()
+            _time.sleep(0.02)
+        return True
+
     def closeEvent(self, event):
         """終了時の処理"""
+        # 1.0.2.0: closeEvent()内で processEvents() を回すようになったため、
+        # 待機中にユーザーが「最後の1枚のタブ」を閉じると close_tab_by_item()
+        # から self.close() が呼ばれ、closeEvent() がまだ実行中（終了処理の
+        # 待機ループの中）のうちに *再入* してしまうケースがあった。
+        # QWidget.close() は QCloseEvent を同期的に送出するため、これは
+        # 通常のPython関数呼び出しと同じように、外側のclose処理が終わる前に
+        # 内側のclose処理が丸ごと完走してしまう、という再入呼び出しになる。
+        # 内側の呼び出しが先にタブを全て破棄・プロファイルの後始末まで
+        # 終えてしまうと、外側の呼び出しがまだ処理中だったキュー済みの
+        # シグナル（_reload_settings_tab_slot等）が、破棄済みのタブを
+        # 参照して例外を起こしていた（ASI-0004）。
+        # 既に終了処理が進行中なら、ここでは何もせず素通しし、外側の
+        # 呼び出しに後始末を一本化させる。
+        if self._is_closing:
+            event.accept()
+            return
+        self._is_closing = True
+
         self.save_current_session()
 
         if self.settings.value("clear_on_exit", False, type=bool):
@@ -4428,9 +4521,21 @@ class VerticalTabBrowser(QMainWindow):
         # ネットワークI/OやRust拡張のネイティブ処理と後始末が競合し、
         # Windowsでヒープ破壊クラッシュ（終了時に code 0xc0000374 が
         # コンソールに出る不具合）の原因になっていたため、ここで完了を待つ。
+        #
+        # 1.0.2.0: 以前は thread.join(timeout) で単純にGUIスレッドを
+        # ブロックしていたが、これだとQtのイベントループが一切回らず、
+        # 待機中にユーザーがタブを閉じる/切り替えるなどの操作をすると
+        # そのイベントが処理されないまま溜まってしまう。後続のタブ破棄
+        # 処理（web_viewをNone化してからのprocessEvents()呼び出し）で
+        # それらが遅れて処理されると、既にNone化されたweb_viewを参照する
+        # ハンドラ（on_tab_changed / close_tab_by_item）が例外を起こす
+        # 不具合があった（ASI-0004）。
+        # ここでは自前でポーリングしながら processEvents() を回すことで、
+        # 待機中もウィンドウを応答可能な状態に保ち、ユーザー操作をその場で
+        # 正常に処理できるようにする（＝取りこぼしによる遅延実行を防ぐ）。
         if hasattr(self, "adblock_manager") and self.adblock_manager.is_updating():
             log("[INFO] AdBlockフィルター更新の完了を待っています...")
-            if not self.adblock_manager.wait_for_update(timeout=15.0):
+            if not self._wait_pumping_events(self.adblock_manager.is_updating, timeout=15.0):
                 log("[WARN] AdBlockフィルター更新が15秒以内に終わらなかったため、"
                     "完了を待たずに終了処理を続行します")
 
@@ -4439,7 +4544,7 @@ class VerticalTabBrowser(QMainWindow):
             # ウィンドウ（延いてはこのオブジェクトへの参照）が消える前に
             # 必ず終了を待つ。
             log("[INFO] 更新チェックの完了を待っています...")
-            if not self.update_checker.wait(5000):
+            if not self._wait_pumping_events(self.update_checker.isRunning, timeout=5.0):
                 log("[WARN] 更新チェックが5秒以内に終わらなかったため、"
                     "完了を待たずに終了処理を続行します")
 
