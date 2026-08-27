@@ -34,18 +34,19 @@ fi
 
 # ── 3. ビルド依存パッケージのインストール（distro検出）────────
 echo
-echo "[INFO] Installing build dependencies (binutils patchelf gcc build-essential)..."
+echo "[INFO] Installing packaging tools (dpkg-deb / rpmbuild) for .deb & .rpm generation..."
 if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get install -y binutils patchelf gcc build-essential
+    sudo apt-get install -y binutils patchelf gcc build-essential rpm
 elif command -v dnf >/dev/null 2>&1; then
-    sudo dnf install -y binutils patchelf gcc gcc-c++ make
+    sudo dnf install -y binutils patchelf gcc gcc-c++ make rpm-build dpkg
 elif command -v pacman >/dev/null 2>&1; then
-    sudo pacman -S --noconfirm binutils patchelf gcc base-devel
+    sudo pacman -S --noconfirm binutils patchelf gcc base-devel rpm-tools dpkg
 elif command -v zypper >/dev/null 2>&1; then
-    sudo zypper install -y binutils patchelf gcc gcc-c++ make
+    sudo zypper install -y binutils patchelf gcc gcc-c++ make rpm-build dpkg
 else
     echo "[WARN] Unknown package manager. Please install manually:"
     echo "       binutils patchelf gcc build-essential (or equivalent)"
+    echo "       plus dpkg-deb (dpkg/dpkg-dev) and rpmbuild (rpm/rpm-build) for .deb/.rpm packaging"
 fi
 
 # ── 4. ビルドスクリプトに実行権を付与 ───────────────────────
@@ -104,6 +105,9 @@ echo "   uv run python Strollon.py"
 echo
 echo " Build: (AppImage)"
 echo "   ./scripts/build-linux-x64-appimage.sh"
+echo
+echo " Build: (Experimental)"
+echo "   ./scripts/build-linux-x64-amd64.sh"
 echo
 
 exec bash

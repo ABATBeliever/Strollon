@@ -46,8 +46,8 @@ IS_LINUX:   bool = ("linux" in _arch_lower) or ("rasp" in _arch_lower)
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "1.0.2.0"
-BROWSER_VERSION_NAME     = "1.0.2.0 Stable"
+BROWSER_VERSION_SEMANTIC = "1.1.0.0"
+BROWSER_VERSION_NAME     = "1.1.0.0 Stable"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================
@@ -228,7 +228,7 @@ def _apply_dirs(mode: str):
     global CONFIG_DIR, DATA_DIR, CACHE_DIR, STATE_DIR
     global THEMES_DIR, CONFIG_FILE
     global HISTORY_DB, SESSION_FILE, BOOKMARKS_DB, DOWNLOADS_DB, DOWNLOADS_DIR
-    global LOG_FILE, PROFILE_PATH, INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH
+    global LOG_FILE, PROFILE_PATH, INCOGNITO_CACHE_PATH
 
     CONFIG_DIR, DATA_DIR, CACHE_DIR, STATE_DIR = _build_dirs(mode)
 
@@ -250,8 +250,11 @@ def _apply_dirs(mode: str):
     LOG_FILE = STATE_DIR / "strollon.log"
 
     PROFILE_PATH         = STATE_DIR / "profile"
+    # シークレットタブの QWebEngineProfile は 1.1.0.0 でオフレコ（メモリ完結）
+    # プロファイルに変更したため、Chromium側の永続ストレージ用パスは不要になった。
+    # PDFキャッシュ（strollon-pdf:// が読むファイル実体）はStrollon独自の仕組みで
+    # ディスクに書く必要があるため、そちらの置き場所としてのみ引き続き使用する。
     INCOGNITO_CACHE_PATH = CACHE_DIR / "incognito"
-    INCOGNITO_STATE_PATH = STATE_DIR / "incognito_storage"
 
 
 # モード確定後にすぐディレクトリを設定する（QApplication より前）
@@ -595,6 +598,14 @@ def main():
     # ---- セグメンテーションフォルト等のネイティブクラッシュをログに記録 ----
     faulthandler.enable()
 
+    # 1.2.0.0-rc1: OSから渡された「生の」コマンドライン引数を、
+    # apply_chromium_flags_from_settings() が sys.argv に自前のChromium
+    # フラグを追記する前の時点で確保しておく。
+    # （既定のブラウザに指定された場合、Windowsは
+    #   "Strollon.exe" "<URL>" の形で起動する。argv[0] は実行ファイル名
+    #   なのでそれ以降だけを対象にする）
+    _cli_raw_args = list(sys.argv[1:])
+
     # ---- Python 未処理例外をログファイルに記録してから終了 ----
     def _excepthook(exc_type, exc_value, exc_tb):
         msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
@@ -623,15 +634,18 @@ def main():
     except Exception as e:
         log(f"[WARN] PDF cache clear failed: {e}")
 
-    # ---- シークレットモードのキャッシュ・ストレージ残留物を起動時にも削除 ----
-    # closeEvent でも削除を試みているが、終了時点では QWebEngineProfile
-    # （Chromium側）がまだファイルハンドルを保持していることがあり、
-    # 特にWindowsではロック中のファイルが削除できず ignore_errors=True で
-    # 失敗が握りつぶされて残留することがあった。起動時（＝どの
-    # QWebEngineProfileもまだ生成されておらずファイルハンドルが一切ない
-    # タイミング）にも必ず掃除することで、削除漏れを確実に解消する。
+    # ---- シークレットタブのPDFキャッシュ残留物を起動時にも削除 ----
+    # 1.1.0.0 でシークレットタブの QWebEngineProfile を完全オフレコ化した
+    # ため、Chromium側のCookie/LocalStorage/HTTPキャッシュはそもそも
+    # ディスクに書かれなくなった。ただし strollon-pdf:// ビューア用の
+    # PDFキャッシュ（INCOGNITO_CACHE_PATH）はStrollon独自の仕組みで
+    # ディスクに書く必要があるため、こちらは引き続き掃除が必要。
+    # closeEvent でも削除を試みているが、終了時点ではファイルハンドルが
+    # 残っていることがあり（特にWindows）、ignore_errors=True で失敗が
+    # 握りつぶされて残留することがあった。起動時（＝どのファイルも
+    # 開かれていないタイミング）にも必ず掃除することで削除漏れを解消する。
     import shutil as _shutil
-    for _incognito_leftover in (INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH):
+    for _incognito_leftover in (INCOGNITO_CACHE_PATH,):
         try:
             if _incognito_leftover.exists():
                 _shutil.rmtree(_incognito_leftover, ignore_errors=True)
@@ -640,6 +654,54 @@ def main():
             log(f"[WARN] Incognito leftover clear failed: {e}")
 
     app = QApplication(sys.argv)
+
+    # =================================================================
+    # 1.2.0.0-rc1: シングルインスタンス化（実験的機能）
+    # =================================================================
+    # 既にStrollonが起動中であれば、CLI引数（あれば）をIPC経由で既存
+    # プロセスに渡し、この2個目のプロセスは即座に終了する。
+    # 何もせずに2個目のフルインスタンス（プロファイル・アドブロック
+    # エンジン・全タブ復元…）を起動してしまうと、既定のブラウザに
+    # 設定した状態でリンクをクリックするたびにプロセスが積み重なって
+    # しまうため、既定のブラウザ対応にはこれが実質必須になる。
+    #
+    # サーバー名は DATA_DIR のハッシュから生成する。ポータブル版と
+    # インストール版など、異なるDATA_DIRを使う複数の「別のStrollon」を
+    # 誤って同一視して混線させないため（＝別プロファイルは別インスタンス
+    # として独立に動作させる）。
+    #
+    # 通信内容: JSON配列（生のCLI引数のリスト）1行 + 改行。
+    # 中身の検証・スキームのホワイトリスト判定は、通常のCLI起動と全く
+    # 同じ resolve_cli_arg() / open_cli_targets() 側で行われるため、
+    # ここでのIPCメッセージ自体は「別プロセスが渡してきたCLI引数と
+    # 全く同じ扱い」＝信頼できない入力として扱われる。
+    # =================================================================
+    from PySide6.QtNetwork import QLocalSocket, QLocalServer
+    import hashlib as _hashlib
+    import json as _json
+
+    _SINGLE_INSTANCE_NAME = "StrollonSingleInstance-" + _hashlib.sha256(
+        str(DATA_DIR).encode("utf-8")
+    ).hexdigest()[:16]
+
+    _ipc_client = QLocalSocket()
+    _ipc_client.connectToServer(_SINGLE_INSTANCE_NAME)
+    if _ipc_client.waitForConnected(300):
+        try:
+            payload = (_json.dumps(_cli_raw_args) + "\n").encode("utf-8")
+            _ipc_client.write(payload)
+            _ipc_client.waitForBytesWritten(1000)
+            _ipc_client.disconnectFromServer()
+            if _ipc_client.state() != QLocalSocket.LocalSocketState.UnconnectedState:
+                _ipc_client.waitForDisconnected(1000)
+            log("[INFO] SingleInstance: an existing Strollon process was found. "
+                "Forwarded CLI args and exiting this process.")
+        except Exception as e:
+            log(f"[WARN] SingleInstance: failed to forward CLI args: {e}")
+        sys.exit(0)
+    # 接続失敗＝起動中のインスタンスが無い（と思われる）ので、
+    # 自分がその唯一のインスタンスとして通常起動を続ける。
+    # サーバー自体の起動（listen）はウィンドウ生成後に行う。
 
     # strollon:// ハンドラ(IOスレッドから呼ばれる)がGUI操作を安全にメイン
     # スレッドへ委譲できるよう、確実にメインスレッド上でここに初期化する。
@@ -689,6 +751,19 @@ def main():
     from browser import VerticalTabBrowser
     browser = VerticalTabBrowser()
     browser.show()
+
+    # 1.2.0.0-rc1: 自分が「唯一のインスタンス」であることが確定したので、
+    # 以後、2個目以降のプロセスからのCLI引数転送を受け取れるように
+    # サーバーを起動する。
+    browser.start_single_instance_server(_SINGLE_INSTANCE_NAME)
+
+    # 1.2.0.0-rc1: コマンドライン引数（既定のブラウザとして起動された
+    # 場合のURL/ファイルパス等）を解釈して開く。
+    # restore_session() は VerticalTabBrowser.__init__() 内で既に実行
+    # 済みのため、通常起動時のタブ復元/ホームページ表示を妨げない
+    # （CLI引数が無ければ何もしない＝従来通りの挙動を維持）。
+    if _cli_raw_args:
+        browser.open_cli_targets(_cli_raw_args)
 
     sys.exit(app.exec())
 

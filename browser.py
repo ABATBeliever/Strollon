@@ -99,7 +99,7 @@ from PySide6.QtGui import QFont, QAction, QShortcut, QKeySequence
 import qtawesome as qta
 
 from constants import STYLES, BROWSER_FULL_NAME, BROWSER_VERSION_SEMANTIC, DOWNLOADS_DIR, USER_AGENT_PRESETS, \
-    PROFILE_PATH, INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH, CACHE_DIR, CHECK_FOR_UPDATES, settings, log, \
+    PROFILE_PATH, INCOGNITO_CACHE_PATH, CACHE_DIR, CHECK_FOR_UPDATES, settings, log, \
     IS_FIRST_RUN, IS_UPDATED, BROWSER_VERSION_NAME, INSTALL, INSTALL_MODE, PDFJS_DIR
 from managers import HistoryManager, BookmarkManager, DownloadManager, SessionManager, UpdateChecker
 from dialogs import AddBookmarkDialog, FindDialog, SavePageDialog
@@ -656,6 +656,15 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
           <p>Version {version_name} の変更内容です。</p>
         </div>
         <div class="release-scroll">
+          <h2>1.1.0.0 Stable</h2>
+          <ul>
+            <li><span class="tag tag-new">追加</span> シングルインスタンス化しました。</li>
+            <li><span class="tag tag-new">追加</span> 一部の引数(? 検索語、URL、ローカル)に対応しました。</li>
+            <li><span class="tag tag-fix">改善</span> URLバーの右クリックメニューの一部が正常に動作しない問題(ASI-0002)を修正しました。</li>
+            <li><span class="tag tag-fix">改善</span> URLバーとタブバーのボタンのサイズを揃えました(ASI-0004)。</li>
+            <li><span class="tag tag-fix">改善</span> プライベートモードのセッションデータをメモリ上で保持するように変更しました。</li>
+          </ul>
+          <hr>
           <h2>1.0.2.0 Stable</h2>
           <ul>
             <li><span class="tag tag-fix">改善</span> 起動時・終了時に関する2つのバグ(ASI-0008,0010)を修正しました。</li>
@@ -2379,6 +2388,25 @@ class UrlLineEdit(QLineEdit):
         self._user_focused = False
 
     def focusOutEvent(self, event):
+        # =============================================================
+        # 1.1.0.0 バグ修正 (ASI-0002): 右クリックメニューでの選択解除対策
+        # =============================================================
+        # 右クリックでコンテキストメニュー（QMenu）を開くと、ポップアップに
+        # フォーカスを奪われたことを示す Qt.PopupFocusReason で
+        # focusOutEvent が発生する。これを他の「本当のフォーカスアウト」
+        # （タブ移動・他ウィジェットへのクリックなど）と区別せずに
+        # self.home(False) を実行していたため、メニューが表示される
+        # 直前に選択範囲とカーソル位置がリセットされてしまい、
+        # Cut/Copy/Delete が無効化され、Paste は選択範囲を置換できず、
+        # Select All も直後に打ち消される、という不具合が起きていた。
+        #
+        # ポップアップ由来のフォーカスアウトでは選択範囲・カーソル位置を
+        # 一切変更しないことで、右クリックメニューの操作を正しく機能させる。
+        # =============================================================
+        if event.reason() == Qt.PopupFocusReason:
+            super().focusOutEvent(event)
+            return
+
         self._user_focused = False
         super().focusOutEvent(event)
         # カーソルを先頭に移動してドメインを見えるようにする
@@ -2736,10 +2764,26 @@ class VerticalTabBrowser(QMainWindow):
         self.profile.setCachePath(str(CACHE_DIR / "profile"))
         self.profile.setPersistentCookiesPolicy(QWebEngineProfile.AllowPersistentCookies)
 
-        # シークレット用プロファイル（非永続）
-        self.incognito_profile = QWebEngineProfile("StrollonIncognito")
-        self.incognito_profile.setCachePath(str(INCOGNITO_CACHE_PATH))
-        self.incognito_profile.setPersistentStoragePath(str(INCOGNITO_STATE_PATH))
+        # シークレット用プロファイル（1.1.0.0: 真のオフレコ＝メモリ完結プロファイル）
+        # -----------------------------------------------------------------
+        # 以前は QWebEngineProfile("StrollonIncognito") という「名前付き」
+        # プロファイルに setCachePath / setPersistentStoragePath でディスク上の
+        # パスを明示的に与えていた。この構成は Cookie にこそ
+        # NoPersistentCookies を設定していたものの、LocalStorage・
+        # IndexedDB・Service Worker・HTTPキャッシュ等はセッション中
+        # ディスクに書き込まれてしまい、閉じる際／起動時の２重クリーンアップ
+        # 頼みで「消し忘れ」の可能性が残る設計だった（アプリが異常終了した
+        # 場合、次回起動でのクリーンアップまでの間はディスク上に残る）。
+        #
+        # QWebEngineProfile は「名前を指定せずに生成する」と、QtWebEngine
+        # （Chromium）側の仕様として自動的にオフレコプロファイル
+        # （isOffTheRecord() == True）になり、Cookie/LocalStorage/
+        # IndexedDB/HTTPキャッシュ等が最初から一切ディスクに書かれず
+        # メモリ上だけで完結する。setCachePath() / setPersistentStoragePath()
+        # は元々不要（呼んでも無視される）なので削除した。
+        self.incognito_profile = QWebEngineProfile()
+        # Cookie不使用の意図を明示するため、冗長でも明示的に設定しておく
+        # （オフレコプロファイルでは既定でも永続化されない）。
         self.incognito_profile.setPersistentCookiesPolicy(QWebEngineProfile.NoPersistentCookies)
 
         # strollon:// スキームハンドラーを両プロファイルに登録
@@ -3825,14 +3869,37 @@ class VerticalTabBrowser(QMainWindow):
         widget = QWidget()
         widget.setStyleSheet(STYLES['tab_list'])
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        # 1.1.0.0 バグ修正 (ASI-0004・続き): ボタン自体の高さ(32px)は
+        # 既に一致していたが、置かれている親要素の「上余白」が
+        # ずれていたため縦位置（＝底辺）が揃っていなかった。
+        #   ・URLバー側: QToolBar の padding: 6px（STYLES['toolbar']）
+        #     → ボタン上端は y=6
+        #   ・タブ一覧側: 元は上下左右すべて 8px
+        #     → +ボタン上端は y=8（2pxずれる）
+        # 上マージンだけツールバー側の 6px に合わせることで、
+        # 高さだけでなく上端・下端の位置も一致させる。
+        # （左右・下のマージンは見た目に影響しないため 8px のまま）
+        layout.setContentsMargins(8, 6, 8, 8)
+        # 1.1.0.0 バグ修正 (ASI-0004・続きその2): +ボタンとタブ一覧の間の
+        # スペーシングが8pxだと、タブ一覧の上辺(y=46)が「URLバー(44px)+
+        # ロード進捗バー(3px)」とブラウザ領域の境目(y=47)より1px高い位置に
+        # 来てしまい、右側のツールバー/ブラウザ境界線と少しズレて見えていた。
+        # 1px分だけ広げて、タブ一覧の上辺をその境目にきっちり合わせる。
+        layout.setSpacing(9)
         
         # 新規タブボタン（横幅いっぱいに拡張）
         new_tab_btn = QPushButton()
         new_tab_btn.setIcon(qta.icon('fa5s.plus', color=STYLES['icon_color_new_tab']))
         new_tab_btn.setToolTip("新規タブ")
-        new_tab_btn.setMinimumHeight(36)
+        # 1.1.0.0 バグ修正 (ASI-0004): URLバーの各ボタン（戻る・進む・
+        # 再読込・ブックマーク・メニュー）は setFixedSize(32, 32) で
+        # QSSのpadding/borderに影響されない厳密な32px固定高さになっている。
+        # 対してこのボタンは setMinimumHeight(36) のみだったため、
+        # button_secondary の padding(8px×2)+border(1px×2) が上乗せされ、
+        # 実際の高さが32pxより数px大きくなっていた。
+        # setFixedHeight(32) にして高さをURLバー側のボタンと揃える
+        # （幅はレイアウトに合わせて可変のまま）。
+        new_tab_btn.setFixedHeight(32)
         new_tab_btn.setStyleSheet(STYLES['button_secondary'])
         new_tab_btn.clicked.connect(lambda: self.add_new_tab(self.settings.value("homepage", "strollon://start")))
         layout.addWidget(new_tab_btn)
@@ -3999,7 +4066,237 @@ class VerticalTabBrowser(QMainWindow):
             return text
         else:
             return self.get_search_url(text)
-    
+
+    # =================================================================
+    # 1.2.0.0-rc1: コマンドライン引数の解釈（実験的機能）
+    # =================================================================
+    # 既定のブラウザに指定された場合、Windowsは
+    #     "Strollon.exe" "<URLまたはファイルパス>"
+    # の形でStrollonを起動する（\shell\open\command の %1 展開）。
+    # また、Windowsの検索ボックス連携では
+    #     "Strollon.exe" "? 検索語"
+    # という形式で呼ばれることがある（Vista以来の慣習）。
+    #
+    # コマンドライン引数は「OSまたは任意の他アプリが自由に指定できる、
+    # 信頼できない入力」である点で process_url_or_search が受け取る
+    # アドレスバー入力（＝ユーザー本人による直接入力）とは性質が異なる。
+    # 特に process_url_or_search は strollon:// をそのまま通すが、
+    # ここではそれを絶対に許してはならない
+    # （他の任意のローカルアプリが Strollon.exe を偽装リンクとして
+    # 起動し、内部ページを直接叩いてくる可能性を潰しておく多層防御。
+    # strollon://settings/save 等はアクショントークンで別途守られている
+    # が、それに加えてそもそも入口を塞ぐ）。
+    # =================================================================
+
+    # CLI引数として受理するURLスキーム（許可リスト方式）。
+    # strollon:// / strollon-pdf:// は明示的に対象外＝内部専用。
+    _CLI_ALLOWED_SCHEMES = ("http://", "https://", "ftp://", "file://")
+    # スキームは持たないが明確に危険とわかる接頭辞は早期に弾く
+    _CLI_DANGEROUS_PREFIXES = ("javascript:", "data:", "vbscript:")
+
+    @staticmethod
+    def _cli_arg_looks_like_local_path(arg: str) -> bool:
+        """
+        スキームなしの引数が「ローカルファイルパスらしいか」を判定する。
+        ファイル関連付け経由（.html等をダブルクリック）で起動された場合、
+        渡ってくるのはURLではなく生のパスであるため、これを検出して
+        file:// へ変換する必要がある。
+        """
+        if re.match(r'^[a-zA-Z]:[\\/]', arg):       # C:\... や C:/...
+            return True
+        if arg.startswith('\\\\') or arg.startswith('//'):  # \\server\share\...
+            return True
+        if arg.startswith('/'):                      # Unix系の絶対パス
+            return True
+        if arg.startswith('./') or arg.startswith('../'):
+            return True
+        return False
+
+    def resolve_cli_arg(self, arg: str) -> str | None:
+        """
+        コマンドライン引数1個を、開くべきURL文字列に変換する。
+        開くべきでない（Chromiumフラグ・不正なスキーム等）と判断した
+        場合は None を返す。
+        """
+        arg = arg.strip()
+        if not arg:
+            return None
+
+        # 自前で sys.argv に足しているChromiumフラグ（-flag / --flag）や、
+        # 他のアプリが渡してきた未知のオプションらしきものは対象外。
+        # URL/ファイルパスが "-" で始まることは実質ないため安全に除外できる。
+        if arg.startswith("-"):
+            return None
+
+        # Windows検索ボックス連携: "? 検索語" 形式
+        if arg.startswith("?"):
+            query = arg[1:].strip()
+            if not query:
+                return None
+            log(f"[INFO] CLI: search box query received: {query!r}")
+            return self.get_search_url(query)
+
+        lowered = arg.lower()
+
+        # 明確に危険な擬似スキームは即座に拒否
+        if lowered.startswith(self._CLI_DANGEROUS_PREFIXES):
+            log(f"[WARN] CLI: dangerous pseudo-scheme rejected: {arg!r}")
+            return None
+
+        # 内部専用スキームは常に拒否（strollon:// / strollon-pdf://）。
+        # 許可リストに含まれないその他のスキーム（chrome:, about: 等)も
+        # ここでまとめて弾かれる。
+        if "://" in arg:
+            if lowered.startswith(self._CLI_ALLOWED_SCHEMES):
+                return arg
+            log(f"[WARN] CLI: unsupported/internal scheme rejected: {arg!r}")
+            return None
+
+        # スキームなし: ローカルファイルパスの可能性を検討する
+        if self._cli_arg_looks_like_local_path(arg) or Path(arg).exists():
+            try:
+                resolved = Path(arg).expanduser().resolve()
+            except OSError:
+                resolved = Path(arg)
+            return QUrl.fromLocalFile(str(resolved)).toString()
+
+        # ドメインらしい文字列ならURLとして、そうでなければ検索語として扱う
+        # （アドレスバーの process_url_or_search と同じ判定ロジックを利用）
+        if self.is_valid_url(arg):
+            return "https://" + arg
+        return self.get_search_url(arg)
+
+    def open_cli_targets(self, args: "list[str]") -> None:
+        """
+        起動時のコマンドライン引数（sys.argv[1:] 相当）を解釈し、
+        開くべきものをそれぞれ新規タブとして開く。
+        複数指定された場合はChromeと同様、全てを新しいタブとして開き、
+        最後に解決できたものをアクティブにする。
+        引数が1つも「開くべき対象」に解決できなかった場合は何もしない
+        （通常起動時の挙動＝restore_session() の結果をそのまま維持する）。
+        """
+        targets: list[str] = []
+        for arg in args:
+            resolved = self.resolve_cli_arg(arg)
+            if resolved:
+                targets.append(resolved)
+
+        if not targets:
+            return
+
+        log(f"[INFO] CLI: opening {len(targets)} target(s) from command line")
+        for i, target in enumerate(targets):
+            self.add_new_tab(target, activate=(i == len(targets) - 1))
+
+    # =================================================================
+    # 1.2.0.0-rc1: シングルインスタンス化 － サーバー側（実験的機能）
+    # =================================================================
+    # 自分が「唯一のインスタンス」である場合、Strollon.py の main() から
+    # start_single_instance_server() が呼ばれ、以後2個目以降のプロセス
+    # からのCLI引数転送を受け取れるようになる。
+    #
+    # 通信内容はJSON配列（生のCLI引数のリスト）1行＋改行のみ。中身は
+    # resolve_cli_arg() / open_cli_targets() に丸ごと渡されるため、
+    # 通常のCLI起動と全く同じ検証（スキームのホワイトリスト等）を経る。
+    # つまりIPC経由だからといって特別扱い＝信頼して良い入力には
+    # ならない。
+    # =================================================================
+
+    def start_single_instance_server(self, server_name: str) -> None:
+        """
+        シングルインスタンスサーバーを起動する。
+        Strollon.py の main() から、ウィンドウ生成後に一度だけ呼ばれる。
+        """
+        from PySide6.QtNetwork import QLocalServer
+
+        # 前回の異常終了等で、OS側にソケット/名前付きパイプの残骸が
+        # 残っている場合に備えて、listen() の前に必ず掃除しておく
+        # （Windowsの名前付きパイプでは基本的に不要だが、Linux/macOSの
+        # Unixドメインソケットではこれを怠るとlisten()が失敗し得る）。
+        QLocalServer.removeServer(server_name)
+
+        self._single_instance_server = QLocalServer(self)
+        self._single_instance_server.newConnection.connect(
+            self._on_single_instance_connection
+        )
+
+        if self._single_instance_server.listen(server_name):
+            log(f"[INFO] SingleInstance: server listening as {server_name!r}")
+            return
+
+        # listen()に失敗した場合（起動直後の極めて短い競合状態で、
+        # 別プロセスに「唯一のインスタンス」の座を取られた等）は、
+        # もう一度クライアントとして接続を試み、成功すれば自分は
+        # このプロセスを終了する。それも失敗する場合は、シングル
+        # インスタンス機構なしで（保護されない状態のまま）通常通り
+        # 動作を続ける。
+        log(f"[WARN] SingleInstance: listen() failed: "
+            f"{self._single_instance_server.errorString()}")
+        from PySide6.QtNetwork import QLocalSocket
+        _retry = QLocalSocket()
+        _retry.connectToServer(server_name)
+        if _retry.waitForConnected(300):
+            log("[WARN] SingleInstance: another instance won the race; "
+                "closing this window instead.")
+            _retry.disconnectFromServer()
+            # 既にウィンドウ・各種プロファイル等を生成済みのタイミング
+            # のため、sys.exit() ではなくアプリケーションの終了処理に
+            # 委ねる（closeEvent 経由でクリーンアップされる）。
+            QTimer.singleShot(0, self.close)
+
+    def _on_single_instance_connection(self) -> None:
+        """2個目以降のプロセスからの接続を受理し、メッセージを読み取る。"""
+        socket = self._single_instance_server.nextPendingConnection()
+        if socket is None:
+            return
+
+        def _try_read():
+            if not socket.canReadLine():
+                return
+            try:
+                socket.readyRead.disconnect(_try_read)
+            except (RuntimeError, TypeError):
+                pass
+            line = bytes(socket.readLine()).decode("utf-8", errors="replace").strip()
+            self._apply_single_instance_message(line)
+            socket.disconnectFromServer()
+
+        socket.readyRead.connect(_try_read)
+        # 接続確立とほぼ同時に書き込みが完了しているケースに備え、
+        # シグナル待ちに入る前に一度だけ即時チェックしておく。
+        _try_read()
+
+    def _apply_single_instance_message(self, raw_line: str) -> None:
+        """
+        受信したJSON配列（生のCLI引数のリスト）を解釈して開く。
+        IPC経由の入力であっても、通常のCLI起動と全く同じ
+        open_cli_targets() / resolve_cli_arg() の検証を経由させる
+        （strollon:// 等の内部スキームは当然ここでも拒否される）。
+        """
+        import json
+        args: list = []
+        if raw_line:
+            try:
+                parsed = json.loads(raw_line)
+                if isinstance(parsed, list):
+                    args = [str(a) for a in parsed]
+            except Exception as e:
+                log(f"[WARN] SingleInstance: malformed message ignored: {e}")
+
+        if args:
+            log(f"[INFO] SingleInstance: received {len(args)} arg(s) from another process")
+            self.open_cli_targets(args)
+
+        # 引数の有無にかかわらず、「もう一度起動された」＝ユーザーが
+        # ブラウザを見たい合図とみなし、ウィンドウを前面に出す
+        # （引数無しの2重起動＝単にウィンドウを呼び戻したいだけ、
+        # というケースを自然にカバーするため）。
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
     def add_new_tab(self, url, activate=True, incognito=False, _return_view=False):
         """
         新規タブ追加。
@@ -4548,20 +4845,20 @@ class VerticalTabBrowser(QMainWindow):
                 log("[WARN] 更新チェックが5秒以内に終わらなかったため、"
                     "完了を待たずに終了処理を続行します")
 
-        # シークレットタブのキャッシュ・ストレージを確実に削除
-        # まずQt側APIでプロファイルの保持データを明示的にクリアしてから
-        # ディスク上のディレクトリを削除する（rmtreeだけに頼るとファイルが
-        # ロックされたままで失敗し、次回起動まで残留することがあるため、
-        # ここでの削除はあくまでベストエフォート。起動時にも同じ処理を
-        # 行い、削除漏れがあれば次回起動時に確実に消す二重の安全網にしている）。
-        try:
-            self.incognito_profile.cookieStore().deleteAllCookies()
-            self.incognito_profile.clearHttpCache()
-        except Exception as _e:
-            log(f"[WARN] Failed to clear incognito profile via Qt API: {_e}")
-
+        # シークレットタブのPDFキャッシュを確実に削除
+        # -----------------------------------------------------------------
+        # 1.1.0.0 でシークレットタブの QWebEngineProfile を完全オフレコ化
+        # したため、Cookie/LocalStorage/IndexedDB/HTTPキャッシュ等はそもそも
+        # ディスクに書かれておらず、Qt側APIでの明示クリア（旧: cookieStore().
+        # deleteAllCookies() / clearHttpCache()）は不要になった。
+        # 一方 strollon-pdf:// ビューア用のPDFキャッシュ（INCOGNITO_CACHE_PATH）
+        # はStrollon独自の仕組みでディスクに書いているため、引き続き
+        # 明示的な削除が必要。rmtreeだけに頼るとファイルがロックされたままで
+        # 失敗し残留することがあるため、あくまでベストエフォート。起動時にも
+        # 同じ処理を行い、削除漏れがあれば次回起動時に確実に消す二重の
+        # 安全網にしている。
         import shutil as _shutil
-        for _incognito_path in (INCOGNITO_CACHE_PATH, INCOGNITO_STATE_PATH):
+        for _incognito_path in (INCOGNITO_CACHE_PATH,):
             try:
                 if _incognito_path.exists():
                     _shutil.rmtree(_incognito_path, ignore_errors=True)
