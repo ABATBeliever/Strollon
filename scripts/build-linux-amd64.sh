@@ -11,7 +11,6 @@ APPDIR="$ROOT_DIR/Strollon.AppDir"
 BIN_DEST="$APPDIR/usr/bin/Strollon"
 APPIMAGETOOL="$SCRIPT_DIR/appimagetool-x86_64.AppImage"
 APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
-APPIMAGE_OUTPUT="$ROOT_DIR/Strollon-x64.AppImage"
 NUITKA_OUTPUT="$ROOT_DIR/Strollon.bin"
 
 APP_NAME="strollon"                                 # コマンド名・パッケージ名
@@ -19,8 +18,46 @@ BIN_NAME="Strollon"                                 # AppDir/usr/bin/Strollon �
 INSTALL_PREFIX="/opt/Strollon"                      # AppImageと同じ自己完結
 MAINTAINER="ABATBeliever <abatbeliever@outlook.jp>" # 開発者表記
 URL="https://abatbeliever.net"                      # 開発元
-LICENSE="LGPL"                                      # ライセンス
+LICENSE="LGPL"                                      # ライセンス（RPM specのLicense:欄用の文字列）
 DESCRIPTION="Strollon WebBrowser"
+
+# ---------------------------------------------------------------------
+# 出力ディレクトリ構成
+# ---------------------------------------------------------------------
+# 以前は生成物を全てROOT_DIR直下に平置きしていたが、形式ごとに
+# ディレクトリを分けて配布しやすくする。
+#   <ARCH>-bin/AppImage/  ... Strollon-x64.AppImage 一式
+#   <ARCH>-bin/deb/       ... .deb 一式
+#   <ARCH>-bin/rpm/       ... .rpm 一式
+#   <ARCH>-bin/tarball/   ... .tar.xz 一式
+DIST_DIR="$ROOT_DIR/${ARCH}-bin"
+DIST_APPIMAGE="$DIST_DIR/AppImage"
+DIST_DEB="$DIST_DIR/deb"
+DIST_RPM="$DIST_DIR/rpm"
+DIST_TARBALL="$DIST_DIR/tarball"
+mkdir -p "$DIST_APPIMAGE" "$DIST_DEB" "$DIST_RPM" "$DIST_TARBALL"
+
+APPIMAGE_OUTPUT="$DIST_APPIMAGE/Strollon-x64.AppImage"
+
+# 各出力ディレクトリに同梱するドキュメント（LICENSE変数とは別名にして
+# 上のRPM spec用文字列と衝突しないようにしている）
+LICENSE_FILE="$ROOT_DIR/LICENSE"
+RELEASE_NOTE_FILE="$ROOT_DIR/ReleaseNote.txt"
+README_FILE="$ROOT_DIR/README.TXT"
+for _doc in "$LICENSE_FILE" "$RELEASE_NOTE_FILE" "$README_FILE"; do
+    if [ ! -f "$_doc" ]; then
+        echo "[ERROR] 同梱予定のドキュメントが見つかりません: $_doc" >&2
+        exit 1
+    fi
+done
+
+# 各出力ディレクトリに LICENSE / ReleaseNote.txt / README.TXT をコピーする
+copy_release_docs() {
+    local dest="$1"
+    cp "$LICENSE_FILE" "$dest/LICENSE"
+    cp "$RELEASE_NOTE_FILE" "$dest/ReleaseNote.txt"
+    cp "$README_FILE" "$dest/README.TXT"
+}
 
 echo "======================================================================"
 echo "[INFO] Strollon Linux ビルド開始  (version=$VERSION, arch=$ARCH)"
@@ -28,7 +65,7 @@ echo "======================================================================"
 echo "[INFO] SCRIPT_DIR : $SCRIPT_DIR"
 echo "[INFO] ROOT_DIR   : $ROOT_DIR"
 echo "[INFO] APPDIR     : $APPDIR"
-echo "[INFO] 出力先     : $ROOT_DIR"
+echo "[INFO] 出力先     : $DIST_DIR/{AppImage,deb,rpm,tarball}/"
 
 # ---------------------------------------------------------------------
 # [1/5] AppImageTool の準備
@@ -93,6 +130,15 @@ if [ -z "$DESKTOP_SRC" ] || [ ! -f "$ICON_SRC" ]; then
 fi
 echo "[INFO] desktop source: $DESKTOP_SRC"
 echo "[INFO] icon source   : $ICON_SRC"
+
+# AppImage単体では .desktop がどこにも自動配置されないため、README記載の
+# 手動デスクトップ統合手順で使えるよう .desktop / アイコンをそのまま同梱する
+# （Exec= はまだ "Strollon %U" のままなので、ユーザー側でAppImageの実際の
+# パスに書き換えてもらう前提。README.TXT の手順を参照）。
+cp "$DESKTOP_SRC" "$DIST_APPIMAGE/Strollon.desktop"
+cp "$ICON_SRC" "$DIST_APPIMAGE/Strollon.png"
+copy_release_docs "$DIST_APPIMAGE"
+echo "[INFO] AppImage用の同梱物（.desktop/アイコン/ドキュメント）を配置しました: $DIST_APPIMAGE"
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -178,10 +224,11 @@ echo "==> アンインストール完了"
 UNINSTALL_EOF
 chmod +x "$TARBALL_ROOT/uninstall.sh"
 
-TARBALL_OUT="$ROOT_DIR/${APP_NAME}-${VERSION}-linux-${ARCH}.tar.xz"
+TARBALL_OUT="$DIST_TARBALL/${APP_NAME}-${VERSION}-linux-${ARCH}.tar.xz"
 echo "[INFO] tar.xz に圧縮中: $TARBALL_OUT"
 tar -C "$WORK_DIR/tarball" -cJf "$TARBALL_OUT" "${APP_NAME}-${VERSION}"
 echo "[INFO] tarball: $TARBALL_OUT ($(du -h "$TARBALL_OUT" | cut -f1))"
+copy_release_docs "$DIST_TARBALL"
 
 # ---------------------------------------------------------------------
 # [5/5] .deb / .rpm
@@ -221,9 +268,10 @@ Maintainer: $MAINTAINER
 Homepage: $URL
 Description: $DESCRIPTION
 EOF
-DEB_OUT="$ROOT_DIR/${APP_NAME}_${VERSION}_${ARCH}.deb"
+DEB_OUT="$DIST_DEB/${APP_NAME}_${VERSION}_${ARCH}.deb"
 dpkg-deb --build --root-owner-group "$DEB_ROOT" "$DEB_OUT"
 echo "[INFO] .deb: $DEB_OUT ($(du -h "$DEB_OUT" | cut -f1))"
+copy_release_docs "$DIST_DEB"
 
 echo "[INFO] .rpm をビルド中 (rpmbuild)..."
 RPM_TOPDIR="$WORK_DIR/rpmbuild"
@@ -254,15 +302,16 @@ EOF
 echo "[INFO] rpmbuild 実行中...（ログ: $WORK_DIR/rpmbuild.log）"
 rpmbuild -bb --define "_topdir $RPM_TOPDIR" "$SPEC" > "$WORK_DIR/rpmbuild.log" 2>&1
 BUILT_RPM="$(find "$RPM_TOPDIR/RPMS" -name '*.rpm' | head -n1)"
-RPM_OUT="$ROOT_DIR/$(basename "$BUILT_RPM")"
+RPM_OUT="$DIST_RPM/$(basename "$BUILT_RPM")"
 cp "$BUILT_RPM" "$RPM_OUT"
 echo "[INFO] .rpm: $RPM_OUT ($(du -h "$RPM_OUT" | cut -f1))"
+copy_release_docs "$DIST_RPM"
 
 echo ""
 echo "======================================================================"
-echo "[INFO] Build Success! 生成物一覧 ($ROOT_DIR):"
-echo "  - $(basename "$APPIMAGE_OUTPUT")"
-echo "  - $(basename "$TARBALL_OUT")"
-echo "  - $(basename "$DEB_OUT")"
-echo "  - $(basename "$RPM_OUT")"
+echo "[INFO] Build Success! 生成物一覧 ($DIST_DIR):"
+echo "  - AppImage/$(basename "$APPIMAGE_OUTPUT")  (+ Strollon.desktop, Strollon.png, LICENSE, ReleaseNote.txt, README.TXT)"
+echo "  - tarball/$(basename "$TARBALL_OUT")  (+ LICENSE, ReleaseNote.txt, README.TXT)"
+echo "  - deb/$(basename "$DEB_OUT")  (+ LICENSE, ReleaseNote.txt, README.TXT)"
+echo "  - rpm/$(basename "$RPM_OUT")  (+ LICENSE, ReleaseNote.txt, README.TXT)"
 echo "======================================================================"

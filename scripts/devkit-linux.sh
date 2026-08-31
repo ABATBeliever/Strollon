@@ -103,11 +103,9 @@ echo
 echo " Run:"
 echo "   uv run python Strollon.py"
 echo
-echo " Build: (AppImage)"
-echo "   ./scripts/build-linux-x64-appimage.sh"
-echo
-echo " Build: (Experimental)"
-echo "   ./scripts/build-linux-x64-amd64.sh"
+echo " Build:"
+echo "   ./scripts/build-linux-amd64.sh"
+echo "   ./scripts/build-linux-aarch64.sh"
 echo
 
 exec bash

@@ -46,11 +46,7 @@ CHROMIUM_FLAGS: dict[str, tuple[str, str]] = {
 # =====================================================================
 # strollon://settings/save, /save-single から書き込むことを許可する設定キー
 # =====================================================================
-# 0.7.5.0 [1.0.0.0-rc3]: 以前は data の中身をキーの検証なしにそのまま
-# settings.setValue(key, val) していたため、strollon:// ページ内で任意の
-# JavaScriptが実行できてしまった場合（例: 履歴/お気に入り/ダウンロード一覧の
-# XSS）に、chromium_custom_args のような危険な設定まで自由に書き換え
-# られてしまう恐れがあった。ここに列挙されたキー以外は無視する。
+# ここに列挙されたキー以外は無視する。
 _STROLLON_SETTINGS_ALLOWED_KEYS = frozenset({
     "homepage", "startup_action", "save_session", "search_engine", "clear_on_exit",
     "do_not_track", "ssl_warn_dialog", "download_dir", "ask_download",
@@ -100,7 +96,7 @@ import qtawesome as qta
 
 from constants import STYLES, BROWSER_FULL_NAME, BROWSER_VERSION_SEMANTIC, DOWNLOADS_DIR, USER_AGENT_PRESETS, \
     PROFILE_PATH, INCOGNITO_CACHE_PATH, CACHE_DIR, CHECK_FOR_UPDATES, settings, log, \
-    IS_FIRST_RUN, IS_UPDATED, BROWSER_VERSION_NAME, INSTALL, INSTALL_MODE, PDFJS_DIR
+    IS_FIRST_RUN, IS_UPDATED, BROWSER_VERSION_NAME, INSTALL, INSTALL_MODE, PDFJS_DIR, LINUX_PACKAGE_KIND
 from managers import HistoryManager, BookmarkManager, DownloadManager, SessionManager, UpdateChecker
 from dialogs import AddBookmarkDialog, FindDialog, SavePageDialog
 
@@ -151,7 +147,6 @@ register_pdf_scheme()
 # =====================================================================
 # strollon:// 内部ページのセキュリティ基盤
 # =====================================================================
-# 0.7.3.0 [1.0.0.0-rc1] で導入されたセキュリティ強化:
 #   1. アクショントークン: 状態変更を伴うエンドポイント(設定保存・削除・
 #      クリアなど)はすべて、プロセス起動時に生成した秘密トークンを
 #      クエリパラメータ `_t` として要求する。外部Webページはこの値を
@@ -656,6 +651,13 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
           <p>Version {version_name} の変更内容です。</p>
         </div>
         <div class="release-scroll">
+          <h2>1.2.0.0 Stable</h2>
+          <ul>
+            <li><span class="tag tag-new">追加</span> Windows インストール版が「既定のブラウザ」に対応しました。</li>
+            <li><span class="tag tag-new">追加</span> Linuxのすべてのバージョンが「既定のブラウザ」に対応しました。</li>
+            <li><span class="tag tag-new">追加</span> Linuxに.deb、.rpm、tarball版を追加しました。</li>
+          </ul>
+          <hr>
           <h2>1.1.0.0 Stable</h2>
           <ul>
             <li><span class="tag tag-new">追加</span> シングルインスタンス化しました。</li>
@@ -1371,13 +1373,21 @@ _WIZARD_CSS = """
 """
 
 
-def _build_about_html(browser_version_name, install_mode, config_file, data_dir, arch) -> str:
+def _build_about_html(browser_version_name, install_mode, config_file, data_dir, arch, linux_package_kind=None) -> str:
     """strollon://about — welcomeウィザードシェル構造のブラウザ情報ページ。"""
     import sys
     from html import escape
     from PySide6 import __version__ as pyside_version
     from PySide6.QtCore import qVersion
     mode_label = "インストール版 (XDG)" if install_mode == "xdg" else "ポータブル版"
+
+    # Linux版のみ: AppImage / パッケージ版(.deb/.rpm/tarball) の区別を表示
+    # (XDGパスの決定には影響しない、表示専用の診断情報)
+    package_kind_row = ""
+    if linux_package_kind:
+        package_kind_row = (
+            '<tr><th>配布形式</th><td>' + escape(linux_package_kind) + '</td></tr>'
+        )
 
     # QtWebEngine バージョン取得
     try:
@@ -1433,6 +1443,7 @@ def _build_about_html(browser_version_name, install_mode, config_file, data_dir,
         <table class="about-table">
           <tr><th>バージョン</th><td>""" + escape(browser_version_name) + """</td></tr>
           <tr><th>インストール種別</th><td>""" + escape(mode_label) + """</td></tr>
+          """ + package_kind_row + """
           <tr><th>アーキテクチャ</th><td>""" + escape(arch) + """</td></tr>
           <tr><th>開発者</th><td>ABATBeliever</td></tr>
           <tr><th>ライセンス</th><td>GNU LGPL v3</td></tr>
@@ -2179,7 +2190,8 @@ class StrollonSchemeHandler(QWebEngineUrlSchemeHandler):
 
             elif host == "about":
                 html = _build_about_html(BROWSER_VERSION_NAME, INSTALL_MODE,
-                                         CONFIG_FILE, DATA_DIR, BROWSER_TARGET_ARCHITECTURE)
+                                         CONFIG_FILE, DATA_DIR, BROWSER_TARGET_ARCHITECTURE,
+                                         LINUX_PACKAGE_KIND)
 
             elif host == "settings":
                 import json as _json
@@ -3500,7 +3512,7 @@ class VerticalTabBrowser(QMainWindow):
         
         if msg_box.clickedButton() == update_btn:
             download_url = (
-                f"https://abatbeliever.net/software/bin/Strollon/download/"
+                "https://abatbeliever.net/software/bin/Strollon/download/"
             )
             self.add_new_tab(download_url, activate=True)
             log(f"[INFO] UpdateCheck-> Opening download URL: {download_url}")

@@ -27,27 +27,59 @@
 import sys
 import os
 import logging
+import platform
 from pathlib import Path
 
 # =====================================================================
-# プラットフォーム / アーキテクチャ定数
+# プラットフォーム / アーキテクチャ定数（1.2.0.0-rc2: 実行時に自動判定）
 # =====================================================================
-# win-x64 / win-a64 / linux-x64 / linux-a64 / rasp-a64 / mac-a64
+# 以前は "win-x64" のようにビルドごとに人間が書き換える文字列だったが、
+# 書き換え忘れによる事故や、対応アーキテクチャが増えるたびの手作業を
+# 無くすため、標準ライブラリ platform による実行時の自動判定に変更した。
+#
+# 生成される文字列の形式は以前と同じ: win-x64 / win-a64 / linux-x64 /
+# linux-a64 / mac-x64 / mac-a64 など（UPDATE_CHECK_URL 等で従来通り
+# 使えるように、既存の命名規則を踏襲している）。
+#
+# 注意: Raspberry Pi 特有の "rasp-a64" のような細かい機種判定は
+# platform モジュールだけでは行えないため今回は非対応とした
+# （linux-a64 として扱われる）。
 # =====================================================================
 
-BROWSER_TARGET_ARCHITECTURE: str = "win-x64"
+IS_WINDOWS: bool = platform.system() == "Windows"
+IS_LINUX:   bool = platform.system() == "Linux"
+IS_MAC:     bool = platform.system() == "Darwin"
 
-_arch_lower = BROWSER_TARGET_ARCHITECTURE.lower()
-IS_WINDOWS: bool = "win" in _arch_lower
-IS_LINUX:   bool = ("linux" in _arch_lower) or ("rasp" in _arch_lower)
+
+def _detect_os_prefix() -> str:
+    if IS_WINDOWS:
+        return "win"
+    if IS_LINUX:
+        return "linux"
+    if IS_MAC:
+        return "mac"
+    return platform.system().lower() or "unknown"
+
+
+def _detect_arch_suffix() -> str:
+    """platform.machine() の表記ゆれ（amd64/x86_64 等）を x64/a64 に正規化する。"""
+    machine = platform.machine().lower()
+    if machine in ("amd64", "x86_64", "x64"):
+        return "x64"
+    if machine in ("arm64", "aarch64"):
+        return "a64"
+    return machine or "unknown"
+
+
+BROWSER_TARGET_ARCHITECTURE: str = f"{_detect_os_prefix()}-{_detect_arch_suffix()}"
 
 # =====================================================================
 # ブラウザ情報
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "1.1.0.0"
-BROWSER_VERSION_NAME     = "1.1.0.0 Stable"
+BROWSER_VERSION_SEMANTIC = "1.2.0.0"
+BROWSER_VERSION_NAME     = "1.2.0.0 Stable"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================
@@ -65,7 +97,7 @@ UPDATE_CHECK_URL = (
 )
 
 # =====================================================================
-# 更新確認を行うか
+# 更新確認
 # =====================================================================
 
 CHECK_FOR_UPDATES: bool = True
@@ -93,25 +125,92 @@ USER_AGENT_PRESET_NAMES = [
 ]
 
 # =====================================================================
-# 実行ファイルのディレクトリ
+# 実行ファイルの場所（2種類を区別する: 1.2.0.0-rc2で修正）
+# =====================================================================
+# Nuitka の --onefile ビルドでは、次の2つが別の場所を指す
+# （公式ドキュメントに明記されている既知の仕様）:
+#
+#   ・sys.argv[0] … 実際に実行された「元のexe」のパス（恒久的な場所。
+#     インストーラーやユーザーが置いた場所そのもの）
+#   ・__file__    … ブートストラップが展開した先の場所。--onefile では
+#     一時ディレクトリ（--onefile-tempdir-spec 指定時はその場所）。
+#     --include-data-dir 等でビルド時にバンドルしたデータファイルは
+#     "こちら" に展開される。
+#
+# 以前はこの2つを区別せず単一の _EXE_DIR に統一していたため、
+# 「インストーラーが実exeの隣に置く外部ファイル」（ポータブル設定等）
+# を探す分には動いても、「ビルド時にバンドルしたデータ」（pdf.js等）
+# を探すと、Linuxのonefileビルドでは一時展開ディレクトリではなく
+# 実exeの場所を見に行ってしまい、見つからない、という不具合があった
+# （Windows版は --standalone のみ・onefile無しでビルドしているため、
+#   両者が同じ場所を指し、問題が表面化していなかった）。
+#
+# __compiled__ は Nuitka がコンパイル時にのみ注入するグローバル変数で、
+# 「今、Nuitka化された状態で動いているか」の判定に使える
+# （ソースからの直接実行時は存在しないため NameError になる）。
 # =====================================================================
 
+def _is_nuitka_compiled() -> bool:
+    try:
+        __compiled__  # noqa: F821 - Nuitkaコンパイル時のみ存在するグローバル
+        return True
+    except NameError:
+        return False
+
+_IS_NUITKA_COMPILED = _is_nuitka_compiled()
+
+
 def _get_exe_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent.resolve()
+    """
+    実exe（インストーラー等が実際に配置した恒久的な場所）のディレクトリ。
+    ポータブル設定ファイルなど、「外部から実exeの隣に置かれるファイル」
+    を探す用途に使う。
+    """
+    if _IS_NUITKA_COMPILED:
+        return Path(sys.argv[0]).resolve().parent
     return Path(__file__).parent.resolve()
 
 _EXE_DIR = _get_exe_dir()
 
+
+def _get_bundle_dir() -> Path:
+    """
+    ビルド時にバンドルしたデータファイル（--include-data-dir 等）が
+    実際に展開される場所。Nuitka onefileでは一時展開ディレクトリ、
+    standalone単体やソース実行では実行ファイル/スクリプトと同じ
+    ディレクトリになる。
+    """
+    return Path(__file__).parent.resolve()
+
+_BUNDLE_DIR = _get_bundle_dir()
+
 # =====================================================================
-# pdf.js リソースディレクトリ
+# pdf.js リソースディレクトリ（1.2.0.0-rc2: 検出ロジックを堅牢化）
 # =====================================================================
 # アプリ本体に同梱する静的アセット（Apache-2.0 / pdf.js）。
-# ユーザーデータではないため XDG ディレクトリではなく実行ファイル隣に置く。
-# 配置例: <EXE_DIR>/resources/pdfjs/{web,build,LICENSE}
+# ビルド時にバンドルされたデータなので、本来は _BUNDLE_DIR 基準が正しい
+# （Nuitka onefileの一時展開ディレクトリに配置されるため）。
+# ただし将来のNuitkaの挙動変化や--standaloneのみのビルド構成にも
+# 耐えられるよう、_BUNDLE_DIR を最優先にしつつ _EXE_DIR も候補として
+# 試し、実在する方を採用する。
+# 配置例: <BUNDLE_DIR>/resources/pdfjs/{web,build,LICENSE}
 # =====================================================================
 
-PDFJS_DIR = _EXE_DIR / "resources" / "pdfjs"
+def _locate_pdfjs_dir() -> Path:
+    candidates = [("_BUNDLE_DIR（ビルド時データの展開先）", _BUNDLE_DIR)]
+    if _EXE_DIR != _BUNDLE_DIR:
+        candidates.append(("_EXE_DIR（実exeの場所）", _EXE_DIR))
+
+    for _label, _base in candidates:
+        _path = _base / "resources" / "pdfjs"
+        if (_path / "web" / "viewer.html").exists():
+            return _path
+
+    # どの候補にも見つからない場合は、起動時ログで全候補が分かるよう
+    # 最有力候補（_BUNDLE_DIR基準）を返しておく。
+    return candidates[0][1] / "resources" / "pdfjs"
+
+PDFJS_DIR = _locate_pdfjs_dir()
 
 
 def _get_default_downloads_dir() -> Path:
@@ -157,6 +256,32 @@ def _determine_mode() -> str:
     return "xdg" if INSTALL else "portable"
 
 INSTALL_MODE: str = _determine_mode()
+
+# =====================================================================
+# Linuxパッケージ形式の判定（1.2.0.0-rc2: 表示専用の診断情報）
+# =====================================================================
+# 設定画面の「このブラウザについて」で、Linux版のインストール種別が
+# 常に「インストール版 (XDG)」としか表示されず、AppImage/.deb/.rpm/
+# tarballのどれを使っているか分からない、という問題への対応。
+#
+# 注意: これは表示専用であり、INSTALL_MODE（XDGパスの決定）には
+# 一切影響しない。deb/rpm/tarball(install.sh)はいずれもXDG準拠で
+# 完全に同一の挙動をするため、これらを互いに区別する実用上の意味は
+# 薄いと判断し、ここでは「AppImageかどうか」だけを区別する。
+#
+# AppImageのランタイムは、実行時に自分自身で APPIMAGE という環境変数
+# を設定するため、これを見るだけで確実に判定できる
+# （deb/rpm/tarballではこの環境変数は存在しない）。
+# =====================================================================
+
+def _detect_linux_package_kind():
+    if not IS_LINUX:
+        return None
+    if os.environ.get("APPIMAGE"):
+        return "AppImage"
+    return "パッケージ版（.deb / .rpm / tarball）"
+
+LINUX_PACKAGE_KIND = _detect_linux_package_kind()
 
 _portable_config = _EXE_DIR / "config" / _CONFIG_FILENAME
 _xdg_config      = _xdg_config_base / _APP_NAME / _CONFIG_FILENAME
@@ -676,7 +801,7 @@ def main():
     # ここでのIPCメッセージ自体は「別プロセスが渡してきたCLI引数と
     # 全く同じ扱い」＝信頼できない入力として扱われる。
     # =================================================================
-    from PySide6.QtNetwork import QLocalSocket, QLocalServer
+    from PySide6.QtNetwork import QLocalSocket
     import hashlib as _hashlib
     import json as _json
 

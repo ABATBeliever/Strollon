@@ -1,7 +1,8 @@
 [Desktop Entry]
 Name=Strollon WebBrowser
-Exec=Strollon
+Exec=Strollon %U
 Icon=app
 Type=Application
 Categories=Network;WebBrowser;
-X-AppImage-Version=0.2.0.0
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/ftp;
+X-AppImage-Version=1.2.0.0
