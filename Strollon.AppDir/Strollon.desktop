@@ -5,4 +5,4 @@ Icon=app
 Type=Application
 Categories=Network;WebBrowser;
 MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/ftp;
-X-AppImage-Version=1.2.0.0
+X-AppImage-Version=1.3.0.0

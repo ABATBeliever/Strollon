@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
 set -e
 
-VERSION="${1:?バージョン番号を指定してください（例: 1.3.0.0）}"
-ARCH="${2:-amd64}"                                  # .deb向け: amd64 / arm64 等
-RPM_ARCH="$([ "${ARCH}" = amd64 ] && echo x86_64 || echo "${ARCH}")"
+# =======================================================================
+# Strollon Linux aarch64 ビルドスクリプト
+# =======================================================================
+# build-linux-amd64.sh の aarch64 版。Nuitkaはクロスコンパイルできない
+# ため、このスクリプトは実際に aarch64 環境（例: Raspberry Pi 4B上の
+# Ubuntu 24.04 LTS）上で実行すること。amd64機で実行しても正しい
+# バイナリは作れない。
+# =======================================================================
+
+VERSION="${1:?バージョン番号を指定してください（例: 1.2.0.0）}"
+ARCH="${2:-arm64}"                                  # .deb向け表記: arm64（Debian慣習）
+# RPM/AppImageは "aarch64" 表記を使う（Debianの "arm64" とは異なる点に注意）
+RPM_ARCH="$([ "${ARCH}" = arm64 ] && echo aarch64 || echo "${ARCH}")"
+APPIMAGE_ARCH="aarch64"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 APPDIR="$ROOT_DIR/Strollon.AppDir"
 BIN_DEST="$APPDIR/usr/bin/Strollon"
-APPIMAGETOOL="$SCRIPT_DIR/appimagetool-x86_64.AppImage"
-APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+APPIMAGETOOL="$SCRIPT_DIR/appimagetool-aarch64.AppImage"
+APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-aarch64.AppImage"
 NUITKA_OUTPUT="$ROOT_DIR/Strollon.bin"
 
 APP_NAME="strollon"                                 # コマンド名・パッケージ名
@@ -26,7 +37,7 @@ DESCRIPTION="Strollon WebBrowser"
 # ---------------------------------------------------------------------
 # 以前は生成物を全てROOT_DIR直下に平置きしていたが、形式ごとに
 # ディレクトリを分けて配布しやすくする。
-#   <ARCH>-bin/AppImage/  ... Strollon-x64.AppImage 一式
+#   <ARCH>-bin/AppImage/  ... Strollon-arm64.AppImage 一式
 #   <ARCH>-bin/deb/       ... .deb 一式
 #   <ARCH>-bin/rpm/       ... .rpm 一式
 #   <ARCH>-bin/tarball/   ... .tar.xz 一式
@@ -37,7 +48,7 @@ DIST_RPM="$DIST_DIR/rpm"
 DIST_TARBALL="$DIST_DIR/tarball"
 mkdir -p "$DIST_APPIMAGE" "$DIST_DEB" "$DIST_RPM" "$DIST_TARBALL"
 
-APPIMAGE_OUTPUT="$DIST_APPIMAGE/Strollon-x64.AppImage"
+APPIMAGE_OUTPUT="$DIST_APPIMAGE/Strollon-${ARCH}.AppImage"
 
 # 各出力ディレクトリに同梱するドキュメント（LICENSE変数とは別名にして
 # 上のRPM spec用文字列と衝突しないようにしている）
@@ -117,7 +128,7 @@ chmod +x "$BIN_DEST"
 chmod +x "$APPDIR/app.png"
 echo "[INFO] appimagetool 実行中..."
 cd "$ROOT_DIR"
-ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$APPIMAGE_OUTPUT"
+ARCH=$APPIMAGE_ARCH "$APPIMAGETOOL" "$APPDIR" "$APPIMAGE_OUTPUT"
 chmod +x "$APPIMAGE_OUTPUT"
 echo "[INFO] AppImage: $APPIMAGE_OUTPUT ($(du -h "$APPIMAGE_OUTPUT" | cut -f1))"
 

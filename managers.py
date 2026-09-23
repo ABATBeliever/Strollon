@@ -5,21 +5,85 @@ Strollon Browser - データ管理クラス群
 
 import sqlite3
 import json
-import re
 import platform as _platform
+import ssl
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 from packaging import version
-from html import escape, unescape
 
 from PySide6.QtCore import QThread, Signal
 
 from constants import (
     HISTORY_DB, BOOKMARKS_DB, SESSION_FILE, DOWNLOADS_DB,
-    BROWSER_VERSION_SEMANTIC, BROWSER_FULL_NAME, UPDATE_CHECK_URL,
-    set_db_strollon_version, check_db_version,
+    BROWSER_VERSION_SEMANTIC, UPDATE_CHECK_URL,
+    set_db_strollon_version,
     stamp_version_to_json, check_version_stamp, VERSION_KEY, log
 )
+
+
+# =====================================================================
+# HTTPS通信ヘルパー（OS証明書ストア優先 + certifiフォールバック）
+# =====================================================================
+#
+# 1.3.0.0 バグ修正: 一部のWindows環境で、広告ブロックのフィルターダウンロード・
+# 更新チェックの両方が常に
+#   [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed:
+#   unable to get local issuer certificate
+# で失敗する不具合が報告された。urlopen() が明示的にcontextを渡さない場合、
+# ssl.create_default_context() は内部的にOSの証明書ストアを参照するが、
+# Nuitkaでビルドしたスタンドアロン配布物では、実行環境によってはこの
+# システム証明書ストアの参照がうまくいかないケースがある
+# （python.orgの通常のインストーラーで実行した場合には発生しない）。
+#
+# ここで「certifiへ完全に切り替える」のではなく「OS証明書ストアで検証に
+# 失敗した場合にのみ certifi 同梱のCAバンドルで再試行する」設計にしている
+# 理由: 社内プロキシ等でOS証明書ストアに独自のルートCAを追加している
+# 企業環境では、そのOS証明書ストアでの検証が正しい挙動であり、certifiの
+# 一般公開CAバンドルだけを使うとかえって接続できなくなる（実際に動作検証中、
+# この開発環境のサンドボックスがまさにその状態だった: OS既定では成功するのに
+# certifi固定にすると社内的な検証エラーになった）。まずOS既定を試し、
+# 証明書検証エラーの場合にだけcertifiで再試行することで、両方のケースに
+# 対応できるようにする。
+_CERTIFI_CONTEXT = None
+_CERTIFI_CONTEXT_TRIED = False
+
+def _get_certifi_context():
+    """certifi同梱のCAバンドルを使ったSSLContextを返す（フォールバック用）。
+    certifi未インストール、または構築に失敗した場合は None を返す。"""
+    global _CERTIFI_CONTEXT, _CERTIFI_CONTEXT_TRIED
+    if _CERTIFI_CONTEXT_TRIED:
+        return _CERTIFI_CONTEXT
+    _CERTIFI_CONTEXT_TRIED = True
+    try:
+        import certifi
+        _CERTIFI_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+    except Exception as e:
+        log(f"[WARN] Network: certifi CA bundle unavailable ({e})")
+        _CERTIFI_CONTEXT = None
+    return _CERTIFI_CONTEXT
+
+
+def _fetch_url(url: str, timeout: float, user_agent: str) -> bytes:
+    """
+    urlopen() のラッパー。まずOS既定の証明書ストアで通信を試み、
+    証明書検証エラー（ssl.SSLCertVerificationError）の場合にのみ
+    certifi 同梱のCAバンドルで自動的に再試行する。
+    それ以外の例外（タイムアウト・DNS失敗等）はそのまま呼び出し元に送出する。
+    """
+    req = Request(url, headers={"User-Agent": user_agent})
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except URLError as e:
+        if not isinstance(e.reason, ssl.SSLCertVerificationError):
+            raise
+        fallback_ctx = _get_certifi_context()
+        if fallback_ctx is None:
+            raise
+        log(f"[INFO] Network: OS certificate store failed for {url} "
+            f"({e.reason}), retrying with certifi CA bundle")
+        with urlopen(req, timeout=timeout, context=fallback_ctx) as resp:
+            return resp.read()
 
 
 # =====================================================================
@@ -212,74 +276,6 @@ class BookmarkManager:
                 conn.commit()
         except sqlite3.Error as e:
             log(f"[ERROR] delete_bookmark failed: {e}")
-    
-    def export_html(self, filepath):
-        """HTML形式でエクスポート（Netscape Bookmark File Format）"""
-        bookmarks = self.get_bookmarks()
-        folders = {}
-        
-        for bm_id, title, url, folder in bookmarks:
-            if folder not in folders:
-                folders[folder] = []
-            folders[folder].append((title, url))
-        
-        html = [
-            '<!DOCTYPE NETSCAPE-Bookmark-file-1>',
-            '<!-- This is an automatically generated file.',
-            '     It will be read and overwritten.',
-            '     DO NOT EDIT! -->',
-            '<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">',
-            f'<TITLE>Bookmarks - {BROWSER_FULL_NAME}</TITLE>',
-            '<H1>Bookmarks</H1>',
-            '<DL><p>'
-        ]
-        
-        for folder, items in folders.items():
-            if folder != 'root':
-                html.append(f'    <DT><H3>{escape(folder)}</H3>')
-                html.append('    <DL><p>')
-            
-            for title, url in items:
-                html.append(f'        <DT><A HREF="{escape(url)}">{escape(title)}</A>')
-            
-            if folder != 'root':
-                html.append('    </DL><p>')
-        
-        html.append('</DL><p>')
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(html))
-        
-        log(f"[INFO] Bookmarks exported to {filepath}")
-    
-    def import_html(self, filepath):
-        """HTML形式でインポート"""
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            current_folder = 'root'
-            h3_pattern = re.compile(r'<H3[^>]*>(.*?)</H3>', re.IGNORECASE)
-            a_pattern = re.compile(r'<A\s+HREF="([^"]+)"[^>]*>(.*?)</A>', re.IGNORECASE)
-            
-            lines = content.split('\n')
-            for line in lines:
-                h3_match = h3_pattern.search(line)
-                if h3_match:
-                    current_folder = unescape(h3_match.group(1))
-                    continue
-                
-                a_match = a_pattern.search(line)
-                if a_match:
-                    url = unescape(a_match.group(1))
-                    title = unescape(a_match.group(2))
-                    self.add_bookmark(title, url, current_folder)
-            
-            log(f"[INFO] Bookmarks imported from {filepath}")
-            return True
-        except Exception as e:
-            log(f"[ERROR] Failed to import bookmarks: {e}")
-            return False
 
 
 # =====================================================================
@@ -560,6 +556,15 @@ class AdBlockManager:
         # （終了時にこのスレッドを待たずにプロセスを終了すると、Windowsで
         #   ヒープ破壊クラッシュの原因になり得るため）
         self._update_thread = None
+        # 1.3.0.0: 直近のフィルター更新結果 (success: bool, message: str) | None。
+        # 以前は update_filters() の callback に渡すだけで、Settings画面（
+        # strollon://settings）側では一切使われておらず、ログファイル
+        # （strollon.log。起動のたびに上書きされる）を見ない限り、更新が
+        # 実際に失敗していても画面上は何も変化がなく「更新ボタンを押しても
+        # 反応がない／ダウンロードできているのか分からない」ように見えて
+        # いた。ここに保持しておき、Settings画面の再読み込み時に一度だけ
+        # 消費して結果（成功/失敗とその理由）を画面に表示できるようにする。
+        self._last_update_result = None
         self._load_engine()
 
     # ------------------------------------------------------------------
@@ -662,6 +667,44 @@ class AdBlockManager:
         """エンジンにロードされた正味のルール数を返す。"""
         return self._rule_count
 
+    def get_cosmetic_resources(self, url: str):
+        """
+        1.3.0.0: 指定URLに対するコスメティックフィルタ情報
+        （adblock.UrlSpecificResources）を返す。無効時・未ロード時は None。
+
+        これまで Strollon は check_network_urls() によるネットワークレベルの
+        リクエストブロックのみを行っており、EasyList/EasyPrivacy が多く含む
+        要素非表示ルール（##selector 等）を一切適用していなかった。
+        そのため、広告用のiframe/スクリプト自体はブロックできていても、
+        その「空になった枠」やアンチアドブロック検知用のダミー要素が
+        非表示にならずに残り、サイト側の検知スクリプトに広告ブロッカーの
+        存在を気付かれてしまうケースがあった。
+        """
+        if not self.is_enabled() or not self._loaded or self._engine is None:
+            return None
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return None
+        try:
+            return self._engine.url_cosmetic_resources(url)
+        except Exception as e:
+            self._log(f"[AdBlock] cosmetic resource lookup error: {e}")
+            return None
+
+    def get_generic_hide_selectors(self, classes, ids, exceptions):
+        """
+        1.3.0.0: ページ内に実在するクラス名・ID群（classes/ids）から、
+        適用すべき汎用非表示セレクタ（ドメイン非依存の ##.foo のようなルール）
+        のリストを返す。exceptions は get_cosmetic_resources() が返した
+        UrlSpecificResources.exceptions をそのまま渡すこと。
+        """
+        if not self.is_enabled() or not self._loaded or self._engine is None:
+            return []
+        try:
+            return list(self._engine.hidden_class_id_selectors(classes, ids, exceptions))
+        except Exception as e:
+            self._log(f"[AdBlock] generic selector lookup error: {e}")
+            return []
+
     def block_count(self) -> int:
         """ブロックした実績の累計数を返す。"""
         return self._block_count
@@ -675,26 +718,26 @@ class AdBlockManager:
         """フィルター更新スレッドが実行中かどうかを返す。"""
         return self._update_thread is not None and self._update_thread.is_alive()
 
-    def wait_for_update(self, timeout: float | None = None) -> bool:
+    def pop_last_update_result(self):
         """
-        実行中のフィルター更新スレッドの終了を待つ。
-        アプリ終了時（closeEvent等）に、スレッドが動いたままプロセスを
-        終了してしまうのを防ぐために呼ぶ。
-
-        戻り値: タイムアウトまでに終了した（またはそもそも実行中でなかった）ら True。
+        1.3.0.0: 直近のフィルター更新結果を (success, message) のタプルで
+        返し、内部状態はクリアする（一度取得したら消費される）。
+        更新が一度も行われていない場合は None を返す。
+        Settings画面のリロード直後に一度だけ結果を表示するために使う。
         """
-        if self._update_thread is None:
-            return True
-        self._update_thread.join(timeout)
-        return not self._update_thread.is_alive()
+        result = self._last_update_result
+        self._last_update_result = None
+        return result
 
     def update_filters(self, callback=None):
         """フィルターリストをバックグラウンドでダウンロード・再構築する。"""
         import threading
         if self.is_updating():
             self._log("[WARN] AdBlock: update already in progress, ignoring request")
+            message = "フィルターの更新は既に実行中です。しばらく待ってから再度お試しください。"
+            self._last_update_result = (False, message)
             if callback:
-                callback(False, "フィルターの更新は既に実行中です")
+                callback(False, message)
             return
         # 0.7.5.0 [1.0.0.0-rc3]: 以前は daemon=True の生スレッドをどこにも
         # 保持していなかった。このスレッドはネットワークI/O（urlopen）や
@@ -753,7 +796,18 @@ class AdBlockManager:
             self._loaded = True
 
     def _build_engine_from_text(self):
-        """adblock_filters.dat のテキストから Engine を構築してシリアライズキャッシュを作る。"""
+        """
+        adblock_filters.dat のテキストから Engine を構築してシリアライズ
+        キャッシュを作る。
+
+        戻り値: (success, error_message) のタプル。
+        1.3.0.0: 以前はここで例外を捕捉してログに残すだけで、呼び出し元
+        （_download_and_rebuild）には常に「成功」として伝わっていた。
+        そのため、例えば adblock（Rust拡張）側の問題でEngine構築自体が
+        失敗していても、Settings画面には「フィルターを更新しました」と
+        表示され、実際には広告ブロックが機能していない、という状態に
+        気付けなかった。戻り値で成否を伝えるようにする。
+        """
         import adblock as _ab
         try:
             with open(self._filter_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -777,13 +831,14 @@ class AdBlockManager:
             self._loaded = True
             self._log(f"[INFO] AdBlock: engine built ({self._rule_count:,} rules), "
                       f"cache saved ({self._engine_path.stat().st_size:,} bytes)")
+            return True, None
         except Exception as e:
             self._log(f"[ERROR] AdBlock: engine build failed: {e}")
             self._loaded = True
+            return False, str(e)
 
     def _download_and_rebuild(self, callback):
         """バックグラウンドスレッド: ダウンロード → テキスト保存 → Engine 再構築。"""
-        from urllib.request import urlopen, Request
         from urllib.error import URLError
         import datetime
 
@@ -801,11 +856,9 @@ class AdBlockManager:
                 continue
             try:
                 self._log(f"[INFO] AdBlock: downloading {url}")
-                req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urlopen(req, timeout=20) as resp:
-                    text = resp.read().decode("utf-8", errors="ignore")
-                    all_lines.extend(text.splitlines())
-                    self._log(f"[INFO] AdBlock: fetched {url} ({len(text.splitlines())} lines)")
+                text = _fetch_url(url, timeout=20, user_agent="Mozilla/5.0").decode("utf-8", errors="ignore")
+                all_lines.extend(text.splitlines())
+                self._log(f"[INFO] AdBlock: fetched {url} ({len(text.splitlines())} lines)")
             except URLError as e:
                 errors.append(f"{url}: {e.reason}")
                 self._log(f"[WARN] AdBlock: failed {url}: {e.reason}")
@@ -814,8 +867,10 @@ class AdBlockManager:
                 self._log(f"[WARN] AdBlock: error {url}: {e}")
 
         if not all_lines and errors:
+            message = "ダウンロードに失敗しました:\n" + "\n".join(errors)
+            self._last_update_result = (False, message)
             if callback:
-                callback(False, "ダウンロードに失敗しました:\n" + "\n".join(errors))
+                callback(False, message)
             return
 
         # テキストを保存
@@ -824,8 +879,10 @@ class AdBlockManager:
             with open(self._filter_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(all_lines))
         except Exception as e:
+            message = f"保存に失敗しました: {e}"
+            self._last_update_result = (False, message)
             if callback:
-                callback(False, f"保存に失敗しました: {e}")
+                callback(False, message)
             return
 
         # 古いキャッシュを削除して再構築
@@ -835,18 +892,27 @@ class AdBlockManager:
             except Exception:
                 pass
 
-        self._build_engine_from_text()
+        build_ok, build_error = self._build_engine_from_text()
 
         self._settings.setValue("adblock_last_updated", datetime.datetime.now().isoformat())
         self._settings.sync()
 
         line_count = len(all_lines)
-        msg = f"フィルターを更新しました（{line_count:,} 行）"
-        if errors:
-            msg += f"\n※一部取得失敗: {len(errors)} 件"
+        if build_ok:
+            msg = f"フィルターを更新しました（{line_count:,} 行）"
+            if errors:
+                msg += f"\n※一部取得失敗: {len(errors)} 件"
+            success = True
+        else:
+            # ダウンロード自体は成功したが、Engineの構築（adblock拡張側の処理）に
+            # 失敗したケース。これを「成功」として報告すると、広告ブロックが
+            # 実際には機能していないことに気付けなくなるため失敗として扱う。
+            msg = f"フィルターの取得はできましたが、エンジンの構築に失敗しました: {build_error}"
+            success = False
+        self._last_update_result = (success, msg)
         self._log(f"[INFO] AdBlock: {msg}")
         if callback:
-            callback(True, msg)
+            callback(success, msg)
 
 
 # =====================================================================
@@ -862,12 +928,10 @@ class UpdateChecker(QThread):
         try:
             _os = _platform.system()
             _ua = f"Strollon/{BROWSER_VERSION_SEMANTIC} ({_os};)"
-            req = Request(UPDATE_CHECK_URL, headers={"User-Agent": _ua})
-            with urlopen(req, timeout=10) as response:
-                content = response.read().decode('utf-8').strip()
-                log(f"[INFO] UpdateCheck Response: {repr(content[:80])}")
-                self.parse_update_info(content)
-                log("[INFO] UpdateCheck Close")
+            content = _fetch_url(UPDATE_CHECK_URL, timeout=10, user_agent=_ua).decode('utf-8').strip()
+            log(f"[INFO] UpdateCheck Response: {repr(content[:80])}")
+            self.parse_update_info(content)
+            log("[INFO] UpdateCheck Close")
         except URLError as e:
             log(f"[INFO] UpdateCheck Failed (URLError): {e.reason}")
         except Exception as e:

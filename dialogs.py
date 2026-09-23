@@ -3,19 +3,14 @@ Strollon Browser - ダイアログ類
 ブックマーク追加・ページ保存・ページ内検索
 """
 
-import sys
-from pathlib import Path
-
-from PySide6.QtCore import Qt, Signal, QTimer, Slot
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit,
     QLabel, QFrame, QMessageBox, QRadioButton, QGroupBox, QComboBox,
     QFileDialog, QProgressBar, QFormLayout,
 )
 
-from constants import (
-    STYLES, BROWSER_NAME, log,
-)
+from constants import STYLES
 
 
 # =====================================================================

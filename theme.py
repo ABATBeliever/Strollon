@@ -169,9 +169,6 @@ class ThemeEngine:
             names.insert(0, "Default")
         return names
 
-    def current_theme(self) -> str:
-        return self._current_theme
-
     # ------------------------------------------------------------------
     # 読み込み
     # ------------------------------------------------------------------
@@ -322,47 +319,6 @@ class ThemeEngine:
                 width: 1px;
             }}
         """
-
-        # ---- 履歴・ダウンロード カードリスト ----
-        styles["history_list"] = f"""
-            QListWidget {{
-                background-color: {c('bg_surface_dim')};
-                border: none;
-                outline: none;
-            }}
-            QListWidget::item {{
-                padding: 0px;
-                margin: 0px;
-                background-color: transparent;
-                border: none;
-            }}
-            QListWidget::item:selected {{
-                background-color: transparent;
-                border: none;
-            }}
-        """
-        styles["history_card"] = f"""
-            background-color: {c('bg_surface')};
-            border-bottom: 1px solid {c('border_default')};
-        """
-        styles["history_card_hover"] = f"""
-            background-color: {c('bg_hover')};
-            border-bottom: 1px solid {c('border_default')};
-        """
-        styles["history_group_header"] = f"""
-            background-color: {c('bg_surface_dim')};
-            color: {c('text_muted')};
-            font-size: 11px;
-            font-weight: 600;
-            padding: 6px 14px 4px 14px;
-            border-bottom: 1px solid {c('border_default')};
-        """
-        styles["history_title_color"]   = c('text_primary')
-        styles["history_url_color"]     = c('text_muted')
-        styles["history_time_color"]    = c('text_muted')
-        styles["history_bg_surface"]    = c('bg_surface')
-        styles["history_bg_hover"]      = c('bg_hover')
-        styles["history_border"]        = c('border_default')
 
         # ---- menu ----
         styles["menu"] = f"""
@@ -538,29 +494,6 @@ class ThemeEngine:
             }}
         """
 
-        # ---- tab_widget ----
-        styles["tab_widget"] = f"""
-            QTabWidget::pane {{
-                border: 1px solid {c('border_default')};
-                background-color: {c('bg_surface')};
-            }}
-            QTabBar::tab {{
-                background-color: {c('bg_toolbar')};
-                padding: 10px 20px;
-                border: 1px solid {c('border_default')};
-                border-bottom: none;
-                color: {c('text_primary')};
-            }}
-            QTabBar::tab:selected {{
-                background-color: {c('bg_surface')};
-                color: {c('accent_primary')};
-                border-bottom: 2px solid {c('accent_primary')};
-            }}
-            QTabBar::tab:hover {{
-                background-color: {c('accent_light')};
-            }}
-        """
-
         # ---- button_primary ----
         styles["button_primary"] = f"""
             QPushButton {{
@@ -721,7 +654,6 @@ class ThemeEngine:
         styles["icon_color_bookmark"]   = c("color_bookmark")
         styles["icon_color_incognito"]  = c("accent_incognito")
         styles["icon_color_danger"]     = c("color_danger")
-        styles["icon_color_warning"]    = c("color_warning")
         styles["icon_color_new_tab"]    = c("text_primary")
 
         return styles
@@ -984,30 +916,12 @@ def init_theme_engine(themes_dir: Path, theme_name: str = "Default") -> ThemeEng
     """
     テーマエンジンを初期化してグローバル STYLES を更新する。
     StrollonBrowser.py から呼び出すこと。
+
+    テーマの切り替えは設定の変更後にアプリを再起動することで反映される
+    仕様（起動時にこの関数が一度だけ呼ばれ、STYLES が構築される）。
     """
     global theme_engine, STYLES
     theme_engine = ThemeEngine(themes_dir)
     theme_engine.load(theme_name)
     STYLES = theme_engine.build_styles()
     return theme_engine
-
-
-def reload_theme(theme_name: str) -> bool:
-    """
-    実行中にテーマを切り替える。
-    設定ダイアログの「テーマ選択」から呼び出す。
-    戻り値: 成功したら True
-    """
-    global theme_engine, STYLES
-    if theme_engine is None:
-        return False
-    ok = theme_engine.load(theme_name)
-    STYLES = theme_engine.build_styles()
-    return ok
-
-
-def get_colors() -> dict[str, str]:
-    """現在のカラーパレットをそのまま返す（デバッグ・テーマエディタ用）"""
-    if theme_engine is None:
-        return dict(DEFAULT_COLORS)
-    return dict(theme_engine._colors)

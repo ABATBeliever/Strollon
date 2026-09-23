@@ -5,7 +5,6 @@ Strollon Browser - メインブラウザウィンドウ
 
 import re
 import sys
-import os
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -52,7 +51,7 @@ _STROLLON_SETTINGS_ALLOWED_KEYS = frozenset({
     "do_not_track", "ssl_warn_dialog", "download_dir", "ask_download",
     "enable_javascript", "open_pdf_in_viewer", "allow_fullscreen", "auto_load_images",
     "enable_hardware_acceleration", "ua_preset", "ua_custom", "adblock_enabled",
-    "theme", "chromium_custom_args",
+    "theme", "chromium_custom_args", "fixed_tab_width", "window_title_page_only",
 }) | frozenset(CHROMIUM_FLAGS.keys())
 
 
@@ -89,19 +88,19 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import (
-    QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestInterceptor
+    QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestInterceptor, QWebEngineScript
 )
-from PySide6.QtGui import QFont, QAction, QShortcut, QKeySequence
+from PySide6.QtGui import QAction, QShortcut, QKeySequence
 import qtawesome as qta
 
-from constants import STYLES, BROWSER_FULL_NAME, BROWSER_VERSION_SEMANTIC, DOWNLOADS_DIR, USER_AGENT_PRESETS, \
+from constants import STYLES, BROWSER_FULL_NAME, BROWSER_VERSION_SEMANTIC, USER_AGENT_PRESETS, \
     PROFILE_PATH, INCOGNITO_CACHE_PATH, CACHE_DIR, CHECK_FOR_UPDATES, settings, log, \
-    IS_FIRST_RUN, IS_UPDATED, BROWSER_VERSION_NAME, INSTALL, INSTALL_MODE, PDFJS_DIR, LINUX_PACKAGE_KIND
+    IS_FIRST_RUN, IS_UPDATED, INSTALL, PDFJS_DIR, LINUX_PACKAGE_KIND
 from managers import HistoryManager, BookmarkManager, DownloadManager, SessionManager, UpdateChecker
 from dialogs import AddBookmarkDialog, FindDialog, SavePageDialog
 
 
-from PySide6.QtCore import QUrl, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWidgets import QListWidgetItem
 
@@ -115,9 +114,9 @@ from PySide6.QtWebEngineCore import QWebEngineUrlSchemeHandler, QWebEngineUrlReq
 from PySide6.QtCore import QBuffer, QByteArray
 
 from pdf_viewer import (
-    register_pdf_scheme, PdfSchemeHandler, PDF_SCHEME, PDF_VIEWER_HOST,
-    pdf_cache_dir, cache_path_for_url, clear_pdf_cache, friendly_filename,
-    build_viewer_url, is_pdf_viewer_url, digest_from_viewer_url,
+    register_pdf_scheme, PdfSchemeHandler, PDF_SCHEME,
+    pdf_cache_dir, cache_path_for_url, clear_pdf_cache,
+    build_viewer_url, digest_from_viewer_url,
 )
 
 
@@ -285,12 +284,21 @@ def run_on_main_thread(fn):
     return _main_thread_invoker.call(fn)
 
 
-def _build_welcome_html(version_name: str, install: bool) -> str:
+def _build_welcome_html(version_name: str, install: bool, linux_package_kind=None) -> str:
     """
     strollon://welcome 用HTML。
     「次へ/戻る」ウィザード形式。
     """
     mode_label = "インストール版 (XDG)" if install else "ポータブル版"
+
+    # 1.3.0.0: strollon://about にのみ表示していたLinux版の配布形式
+    # （AppImage / パッケージ版）を、strollon://welcome の「準備完了」
+    # スライドにも表示する。Linux以外では linux_package_kind が None
+    # のため、この行自体が出力されない。
+    package_kind_row = ""
+    if linux_package_kind:
+        package_kind_row = f'<tr><th>配布形式</th><td>{linux_package_kind}</td></tr>'
+
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -651,6 +659,18 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
           <p>Version {version_name} の変更内容です。</p>
         </div>
         <div class="release-scroll">
+          <h2>1.3.0.0 Stable</h2>
+          <ul>
+            <li><span class="tag tag-new">追加</span> 音声を再生中のタブにアイコンを表示するようにしました。</li>
+            <li><span class="tag tag-new">追加</span> タブごとのミュート状態と画面拡大率を、セッション復元時に引き継ぐようにしました。</li>
+            <li><span class="tag tag-new">追加</span> 縦タブの幅を固定するモードを追加しました（設定 > 外観）。</li>
+            <li><span class="tag tag-new">追加</span> ウィンドウタイトルをページタイトルのみにするモードを追加しました（設定 > 外観）。</li>
+            <li><span class="tag tag-fix">改善</span> タブが1つの状態で閉じると、次回起動時にそのタブが復元されてしまう直観的でない仕様(ASI-0012)を修正しました。</li>
+            <li><span class="tag tag-fix">改善</span> strollon://welcome にもLinux版の配布形式が表示されるようにしました。</li>
+            <li><span class="tag tag-fix">改善</span> 広告ブロックの精度向上を行いました。</li>
+            <li><span class="tag tag-fix">改善</span> 証明書の問題で、まれに広告ブロックの定義更新や更新チェックが失敗してしまう問題(ASI-0013)を修正しました。</li>
+          </ul>
+          <hr>
           <h2>1.2.0.0 Stable</h2>
           <ul>
             <li><span class="tag tag-new">追加</span> Windows インストール版が「既定のブラウザ」に対応しました。</li>
@@ -690,6 +710,7 @@ def _build_welcome_html(version_name: str, install: bool) -> str:
         <table class="finish-table">
           <tr><th>バージョン</th><td>{version_name}</td></tr>
           <tr><th>インストール種別</th><td>{mode_label}</td></tr>
+          {package_kind_row}
           <tr><th>対応 OS</th><td>Windows 10+ / Linux (Wayland/X11)</td></tr>
           <tr><th>開発者</th><td>ABATBeliever</td></tr>
           <tr><th>ライセンス</th><td>GNU LGPL v3</td></tr>
@@ -1520,10 +1541,20 @@ def _build_settings_html(s, adblock_mgr, themes: list, ua_presets: list,
     else:
         last_updated_str = "未取得"
 
+    # 1.3.0.0: 直近のフィルター更新結果（成功/失敗とその理由）を一度だけ取得する。
+    # 「フィルターを今すぐ更新」ボタン押下後や、初回起動時の自動更新の直後に
+    # このページが再読み込みされたときにだけ非nullになり、通常の閲覧時は
+    # null（何も表示しない）になる。
+    update_result = adblock_mgr.pop_last_update_result() if adblock_mgr else None
+
     adblock_status_json = json.dumps({
         "rule_count": rule_count,
         "block_count": block_count,
         "last_updated": last_updated_str,
+        "update_result": (
+            {"success": update_result[0], "message": update_result[1]}
+            if update_result else None
+        ),
     })
 
     def opts(items, selected_val):
@@ -1640,6 +1671,13 @@ def _build_settings_html(s, adblock_mgr, themes: list, ua_presets: list,
             <select data-key="theme">{theme_opts}</select></div>
           <div class="hint">* のついた項目の反映には、再起動が必要です</div>
         </div>
+        <div class="group">
+          <div class="group-title">タブ・タイトル</div>
+          <label class="check-row"><input type="checkbox" data-key="fixed_tab_width" {ck('fixed_tab_width',False)}>
+            縦タブの幅を固定する</label>
+          <label class="check-row"><input type="checkbox" data-key="window_title_page_only" {ck('window_title_page_only',False)}>
+            ウィンドウタイトルをページタイトルのみにする</label>
+        </div>
       </div>
 
       <div class="section" id="s-privacy">
@@ -1660,6 +1698,7 @@ def _build_settings_html(s, adblock_mgr, themes: list, ua_presets: list,
           <label class="check-row"><input type="checkbox" data-key="adblock_enabled" {ck('adblock_enabled',True)}>
             広告ブロックを有効にする</label>
           <div class="adblock-info" id="adblock-info"></div>
+          <div id="adblock-update-result" class="adblock-info" style="display:none; white-space:pre-wrap;"></div>
           <button class="btn btn-primary" id="adblock-update-btn" onclick="updateFilters(this)"
                   style="margin-top:6px">フィルターを今すぐ更新</button>
         </div>
@@ -1774,11 +1813,23 @@ function __fireStrollon(u) {{
 (function() {{
   const st = INIT.adblock_status;
   const el = document.getElementById('adblock-info');
-  if (!el) return;
-  el.textContent = st.rule_count > 0
-    ? 'ルール数: ' + st.rule_count.toLocaleString() + ' 件 / 最終更新: ' + st.last_updated
-      + ' / ブロック実績: ' + st.block_count.toLocaleString() + ' 件'
-    : 'フィルター未取得 — 「今すぐ更新」でダウンロードしてください';
+  if (el) {{
+    el.textContent = st.rule_count > 0
+      ? 'ルール数: ' + st.rule_count.toLocaleString() + ' 件 / 最終更新: ' + st.last_updated
+        + ' / ブロック実績: ' + st.block_count.toLocaleString() + ' 件'
+      : 'フィルター未取得 — 「今すぐ更新」でダウンロードしてください';
+  }}
+  // 1.3.0.0: 「今すぐ更新」実行直後（または初回起動時の自動更新直後）の
+  // ページ再読み込み時にだけ、成功/失敗の結果を一度だけ控えめなテキストで
+  // 表示する（.adblock-info と同じ見た目 — 背景色や枠線は付けない）。
+  // それ以外の通常の閲覧時は update_result が null なので何も表示しない。
+  const resultEl = document.getElementById('adblock-update-result');
+  if (resultEl && st.update_result) {{
+    const ok = !!st.update_result.success;
+    resultEl.textContent = st.update_result.message;
+    resultEl.style.display = 'block';
+    resultEl.style.color = ok ? '#2e7d32' : '#c0392b';
+  }}
 }})();
 
 // --- セクション表示（パスベース: strollon://settings/general など） ---
@@ -2107,7 +2158,7 @@ class StrollonSchemeHandler(QWebEngineUrlSchemeHandler):
                 p = p.parent() if hasattr(p, 'parent') else None
 
             if host == "welcome":
-                html = _build_welcome_html(BROWSER_VERSION_NAME, INSTALL)
+                html = _build_welcome_html(BROWSER_VERSION_NAME, INSTALL, LINUX_PACKAGE_KIND)
 
             elif host == "start":
                 html = _build_start_html()
@@ -2488,6 +2539,10 @@ class CustomWebEnginePage(QWebEnginePage):
 
     new_tab_requested = Signal(QUrl)
 
+    # 1.3.0.0: コスメティックフィルタ（要素非表示CSS）用に登録するスクリプト名。
+    # ナビゲーションのたびに find→remove→insert し直すための目印。
+    _COSMETIC_SCRIPT_NAME = "strollon-adblock-cosmetic"
+
     def __init__(self, profile, parent=None):
         super().__init__(profile, parent)
         self._profile = profile
@@ -2499,6 +2554,10 @@ class CustomWebEnginePage(QWebEnginePage):
         # None = 未確定（初回の_sync呼び出しで必ず一度は設定させるための番兵値）
         self._js_force_state = None
         self.urlChanged.connect(self._sync_javascript_for_url)
+        # 1.3.0.0: 広告ブロックのコスメティックフィルタ（要素非表示CSS）を
+        # ページ読み込み完了時に適用する（generic hide selectors のため、
+        # 実際に存在するclass/id名が必要なのでDOM構築後にしか判定できない）。
+        self.loadFinished.connect(self._apply_generic_cosmetic_filter)
 
     def _sync_javascript_for_url(self, url: QUrl):
         """
@@ -2582,7 +2641,26 @@ class CustomWebEnginePage(QWebEnginePage):
             log(f"[INFO] SSL certificate error rejected by user: {url_str}")
 
     def _find_browser(self):
-        """親ウィジェットをたどって VerticalTabBrowser を返す"""
+        """
+        VerticalTabBrowser への参照を返す。
+
+        1.3.0.0 バグ修正: 以前は self.parent() を辿るだけの実装だったが、
+        バックグラウンドタブ（activate=False で作成されたタブ。中クリック/
+        Ctrl+クリックで開いたタブ、セッション復元時の非アクティブタブなど）
+        の web_view は、実際にアクティブになるまで web_layout に追加されず
+        親を持たない。そのため、それらのタブでは以下が機能していなかった:
+          - 広告ブロックのコスメティックフィルタ（要素非表示CSS）が
+            一切適用されない
+          - createWindow() 内の self._find_browser() も失敗し、バック
+            グラウンドタブ上のスクリプトが window.open() 等で新規タブを
+            要求しても Strollon のタブとして開かれない
+        add_new_tab() でページ生成直後に設定する直接参照（_browser_ref）を
+        優先して使い、それが無い場合のみ従来通り親ウィジェットを辿る
+        （後方互換のフォールバック）。
+        """
+        direct = getattr(self, "_browser_ref", None)
+        if direct is not None:
+            return direct
         w = self.parent()
         while w and not isinstance(w, VerticalTabBrowser):
             w = w.parent()
@@ -2642,7 +2720,211 @@ class CustomWebEnginePage(QWebEnginePage):
                 is_incognito = self._profile is browser.incognito_profile
                 browser.add_new_tab(url=url.toString(), activate=True, incognito=is_incognito)
             return False  # このページへの遷移をキャンセル
+
+        # 1.3.0.0: 広告ブロックのコスメティックフィルタ（要素非表示CSS）を、
+        # 実際にページの読み込みが始まる前に用意しておく。メインフレームの
+        # 遷移でのみ行う（広告そのものを含むiframe内部のコンテンツに対して
+        # 親ページ用のセレクタを適用しても意味がないため）。
+        if is_main_frame:
+            self._prepare_cosmetic_filter_script(url)
+
         return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+
+    # -----------------------------------------------------------------
+    # 1.3.0.0: 広告ブロック — コスメティックフィルタ（要素非表示CSS）
+    # -----------------------------------------------------------------
+    #
+    # これまで Strollon は adblock エンジンの check_network_urls() による
+    # ネットワークレベルのブロックのみを行っており、EasyList/EasyPrivacy に
+    # 大量に含まれる要素非表示ルール（例: example.com##.ad-banner）を
+    # 一切適用していなかった。この結果、
+    #   - 広告用iframe/スクリプトの「空になった枠」がページ上に残ってしまう
+    #   - サイト側のアンチアドブロック検知（非表示になっているはずの要素の
+    #     有無をチェックする手法）に引っかかり、「広告ブロックを無効に
+    #     してください」という警告が出てしまう
+    # という問題があった。uBlock Origin（Lite含む）はコスメティックフィルタと
+    # 汎用非表示（generic hiding）の両方を実装しているため、この差が出ていた。
+    #
+    # ここでは2段階に分けて適用する:
+    #   1) _prepare_cosmetic_filter_script(): URLだけで判定できるセレクタ
+    #      （ドメイン指定のあるルール・属性セレクタ等）を、ページの読み込みが
+    #      始まる最初期（DocumentCreation）に適用するスクリプトとして事前登録
+    #      する。これにより「広告が一瞬見えてから消える」を防ぐ。
+    #   2) _apply_generic_cosmetic_filter(): ドメイン非依存の汎用クラス/ID
+    #      ルール（例: ##.ad, ##.sponsored）は、そのクラス/IDが実際に
+    #      ページ内に存在するかどうかで判定する必要があるため、DOM構築後
+    #      （loadFinished）にページ内のclass/id一覧を集めてから判定・適用する。
+
+    def _prepare_cosmetic_filter_script(self, url: QUrl):
+        """次のメインフレーム遷移に向けて、コスメティックCSSをDocumentCreation
+        タイミングで注入するQWebEngineScriptを登録し直す。"""
+        scripts = self.scripts()
+        # 1.3.0.0 バグ修正: QWebEngineScriptCollection.find() は
+        # （findScript()ではなく）同名スクリプトの「リスト」を返す仕様
+        # （PySide2時代のfindScript()とは異なる）。QWebEngineScript単体が
+        # 返る前提で .name() を呼んでいたため、実機（Windows）では
+        # 「'list' object has no attribute 'name'」で毎回の画面遷移が
+        # クラッシュしていた。
+        for existing in scripts.find(self._COSMETIC_SCRIPT_NAME):
+            scripts.remove(existing)
+
+        url_str = url.toString()
+        if not (url_str.startswith("http://") or url_str.startswith("https://")):
+            return
+
+        browser = self._find_browser()
+        adblock_mgr = getattr(browser, "adblock_manager", None) if browser else None
+        if not adblock_mgr:
+            return
+        resources = adblock_mgr.get_cosmetic_resources(url_str)
+        if resources is None:
+            return
+
+        css_text = self._build_cosmetic_css(resources.hide_selectors, resources.style_selectors)
+        if not css_text:
+            return
+
+        import json
+        # 1.3.0.0 バグ修正: QtWebEngineの DocumentCreation
+        # インジェクションポイントは、Chrome拡張機能の document_start とは
+        # 異なり document.documentElement（<html>要素）がまだ存在しない
+        # タイミングで実行される。document.documentElement.appendChild を
+        # 直接呼ぶと毎回 TypeError（null参照）になり、try/catchで握り
+        # つぶされて「エラーは出ないがCSSも一切適用されない」状態に
+        # なっていた（動作検証で確認済み）。
+        # <html>要素が現れるのを MutationObserver で待ってから注入する。
+        js = (
+            "(function(){"
+            "function inject(){"
+            "try{"
+            "var s=document.createElement('style');"
+            "s.setAttribute('data-strollon-adblock','1');"
+            "s.textContent=" + json.dumps(css_text) + ";"
+            "document.documentElement.appendChild(s);"
+            "}catch(e){}"
+            "}"
+            "if(document.documentElement){inject();}"
+            "else{"
+            "var mo=new MutationObserver(function(){"
+            "if(document.documentElement){mo.disconnect();inject();}"
+            "});"
+            "mo.observe(document,{childList:true});"
+            "}"
+            "})();"
+        )
+        script = QWebEngineScript()
+        script.setName(self._COSMETIC_SCRIPT_NAME)
+        script.setInjectionPoint(QWebEngineScript.DocumentCreation)
+        script.setWorldId(QWebEngineScript.MainWorld)
+        script.setRunsOnSubFrames(False)
+        script.setSourceCode(js)
+        scripts.insert(script)
+
+    @staticmethod
+    def _build_cosmetic_css(hide_selectors, style_selectors) -> str:
+        """hide_selectors（非表示セレクタ集合）とstyle_selectors（個別CSSの
+        マップ）から、まとめて適用するCSSテキストを組み立てる。"""
+        parts = []
+        if hide_selectors:
+            parts.append(", ".join(hide_selectors) + " { display: none !important; }")
+        for selector, rules in (style_selectors or {}).items():
+            for rule in rules:
+                parts.append(f"{selector} {{ {rule} }}")
+        return "\n".join(parts)
+
+    def _apply_generic_cosmetic_filter(self, ok: bool):
+        """
+        loadFinished後、ページ内に実在するclass/id名を集めて、汎用（ドメイン
+        非依存）の非表示セレクタを判定・適用する（generic hiding）。
+        strollon:// 等の内部ページや、広告ブロック無効時は何もしない。
+        """
+        if not ok:
+            return
+        url = self.url()
+        url_str = url.toString()
+        if not (url_str.startswith("http://") or url_str.startswith("https://")):
+            return
+        browser = self._find_browser()
+        adblock_mgr = getattr(browser, "adblock_manager", None) if browser else None
+        if not adblock_mgr or not adblock_mgr.is_enabled():
+            return
+
+        resources = adblock_mgr.get_cosmetic_resources(url_str)
+        if resources is None or resources.generichide:
+            # generichide が真のルールが適用されている場合、そのサイトでは
+            # 汎用非表示を行わない（EasyList側の明示的な指定を尊重する）。
+            return
+        exceptions = resources.exceptions
+
+        collect_js = """
+        (function(){
+          try {
+            var MAX_ELEMENTS = 20000;
+            var classes = Object.create(null), ids = Object.create(null);
+            var els = document.querySelectorAll('[class],[id]');
+            var n = Math.min(els.length, MAX_ELEMENTS);
+            for (var i = 0; i < n; i++) {
+              var el = els[i];
+              if (el.id) ids[el.id] = true;
+              var cn = el.className;
+              if (cn && typeof cn === 'string') {
+                var parts = cn.split(/\\s+/);
+                for (var j = 0; j < parts.length; j++) {
+                  if (parts[j]) classes[parts[j]] = true;
+                }
+              }
+            }
+            return JSON.stringify({classes: Object.keys(classes), ids: Object.keys(ids)});
+          } catch (e) {
+            return '';
+          }
+        })();
+        """
+
+        def _on_tokens(result):
+            try:
+                # 1.3.0.0 バグ修正: QWebEnginePage.runJavaScript() の
+                # コールバックは、配列やオブジェクトをそのまま返すと
+                # （このPySide6/QtWebEngineの実装では）常に空文字列に
+                # なってしまい、Python側のQVariant変換が信用できない。
+                # 数値・文字列は正しく変換されるため、JS側で
+                # JSON.stringify() して文字列として受け取り、Python側で
+                # json.loads() する。
+                if not result or not isinstance(result, str):
+                    return
+                import json
+                data = json.loads(result)
+                classes = data.get("classes") or []
+                ids = data.get("ids") or []
+                if not classes and not ids:
+                    return
+                selectors = adblock_mgr.get_generic_hide_selectors(classes, ids, exceptions)
+                if not selectors:
+                    return
+                # 1.3.0.0 バグ修正: ここに来るまでの間（runJavaScript の往復）に
+                # ユーザーが別のページへ遷移している可能性がある。selectors は
+                # 遷移前のページのclass/id・exceptionsから計算したものなので、
+                # 別ページに注入すると無関係な要素を誤って隠してしまう
+                # （特に "ad" 等の一般的なクラス名は複数サイトで衝突しやすい）。
+                # 注入直前に現在のURLが計算時と同じか確認し、違えば何もしない。
+                if self.url().toString() != url_str:
+                    return
+                css_text = ", ".join(selectors) + " { display: none !important; }"
+                inject_js = (
+                    "(function(){"
+                    "try{"
+                    "var s=document.createElement('style');"
+                    "s.setAttribute('data-strollon-adblock-generic','1');"
+                    "s.textContent=" + json.dumps(css_text) + ";"
+                    "document.documentElement.appendChild(s);"
+                    "}catch(e){}"
+                    "})();"
+                )
+                self.runJavaScript(inject_js)
+            except Exception as e:
+                log(f"[WARN] AdBlock: generic cosmetic filter apply failed: {e}")
+
+        self.runJavaScript(collect_js, _on_tokens)
 
 
 # =====================================================================
@@ -2674,12 +2956,19 @@ class TabItemWidget(QWidget):
             self.incognito_icon.setStyleSheet("background: transparent; padding: 0px;")
             layout.addWidget(self.incognito_icon)
         
-        # ミュートアイコン（初期状態では非表示）
-        self.mute_icon = QLabel()
-        self.mute_icon.setPixmap(qta.icon('fa5s.volume-mute', color=STYLES['icon_color_default']).pixmap(12, 12))
-        self.mute_icon.setStyleSheet("background: transparent; padding: 0px;")
-        self.mute_icon.setVisible(False)
-        layout.addWidget(self.mute_icon)
+        # ミュート / 音声再生中アイコン（1.3.0.0: 同一のQLabelを共有し、
+        # 状態に応じてピクスマップを差し替える。どちらも qtawesome の
+        # ベクターアイコンを使うことで、Unicode絵文字のようにOS・フォント
+        # 依存でレンダリングが崩れる（Windowsで色無しになる／文字化けする等）
+        # ことなく、ミュート表示と音声再生中表示の見た目を完全に統一する）。
+        self._muted_pixmap = qta.icon('fa5s.volume-mute', color=STYLES['icon_color_default']).pixmap(12, 12)
+        self._audio_playing_pixmap = qta.icon('fa5s.volume-up', color=STYLES['icon_color_default']).pixmap(12, 12)
+        self._is_muted = False
+        self._is_playing_audio = False
+        self.status_icon = QLabel()
+        self.status_icon.setStyleSheet("background: transparent; padding: 0px;")
+        self.status_icon.setVisible(False)
+        layout.addWidget(self.status_icon)
         
         # タイトルラベル
         # ページの<title>はWeb側が自由に設定できる値なので、Qtの自動リッチテキスト
@@ -2705,9 +2994,28 @@ class TabItemWidget(QWidget):
         """タイトルを設定"""
         self.title_label.setText(title)
     
+    def _refresh_status_icon(self):
+        """ミュート・音声再生中の状態から status_icon の表示を更新する。
+        両方の状態が同時に真になることは呼び出し側の設計上ないが、念のため
+        ミュートを優先する（音を止めている、という事実の方が重要なため）。"""
+        if self._is_muted:
+            self.status_icon.setPixmap(self._muted_pixmap)
+            self.status_icon.setVisible(True)
+        elif self._is_playing_audio:
+            self.status_icon.setPixmap(self._audio_playing_pixmap)
+            self.status_icon.setVisible(True)
+        else:
+            self.status_icon.setVisible(False)
+    
     def set_muted(self, is_muted):
         """ミュート状態を設定"""
-        self.mute_icon.setVisible(is_muted)
+        self._is_muted = is_muted
+        self._refresh_status_icon()
+    
+    def set_playing_audio(self, is_playing_audio):
+        """1.3.0.0: 音声再生中状態を設定"""
+        self._is_playing_audio = is_playing_audio
+        self._refresh_status_icon()
 
 
 class TabItem(QListWidgetItem):
@@ -2718,6 +3026,7 @@ class TabItem(QListWidgetItem):
         self.web_view = web_view
         self.url = web_view.url()
         self.is_muted = False
+        self.is_playing_audio = False  # 1.3.0.0: 音声再生中インジケータ用
         self.incognito = incognito  # シークレットタブフラグ
         self.widget = TabItemWidget(title, incognito=incognito)
         # サイズヒントを大きめに設定
@@ -2904,6 +3213,26 @@ class VerticalTabBrowser(QMainWindow):
         self._dnt_interceptor.set_dnt_enabled(self.do_not_track)
         self._dnt_interceptor_incognito.set_dnt_enabled(self.do_not_track)
         log(f"[INFO] DNT header set to: {'1' if self.do_not_track else '0'}")
+
+        # 1.3.0.0: 縦タブ幅固定モード。
+        # __init__ では apply_settings() が init_ui() より先に呼ばれるため、
+        # その最初の呼び出し時点ではまだ self.main_splitter が存在しない
+        # （初期値は init_ui() 側で直接設定済み）。ここでは設定変更時の
+        # 再適用としてのみ機能させるため、存在する場合だけ反映する。
+        if hasattr(self, "main_splitter"):
+            self._apply_fixed_tab_width(
+                self.settings.value("fixed_tab_width", False, type=bool)
+            )
+
+        # 1.3.0.0: ウィンドウタイトルをページタイトルのみにするモード。
+        # update_window_title() から毎回設定を読み直す代わりにここでキャッシュし、
+        # 他の設定（do_not_track等）と同じ扱いにする。
+        self.title_page_only = self.settings.value("window_title_page_only", False, type=bool)
+        # 現在アクティブなタブがあれば、タイトル表示にこの設定変更を即座に反映する
+        if hasattr(self, "tab_list"):
+            current_item = self.tab_list.currentItem()
+            if isinstance(current_item, TabItem) and current_item.web_view is not None:
+                self.update_window_title(current_item.web_view.title())
 
         # 広告ブロック設定をインターセプターに反映
         if hasattr(self, 'adblock_manager'):
@@ -3200,6 +3529,68 @@ class VerticalTabBrowser(QMainWindow):
         except Exception as _e:
             log(f"[WARN] OS notification failed: {_e}")
     
+    def _apply_fixed_tab_width(self, fixed: bool):
+        """
+        1.3.0.0: 縦タブ幅固定モードの適用/解除。
+
+        QSplitter.setStretchFactor() は実際にはウィジェットの
+        QSizePolicy のストレッチ値を設定するだけの便宜関数で、
+        ウィンドウリサイズのたびにQSplitterが必ずその比率で再配分する
+        ことを保証するものではない（Qt公式ドキュメント上も「初期配分に
+        使われる」とあるのみ）。確実に「タブ側の幅を維持する」ためには、
+        resizeEvent() 側で明示的に setSizes() をやり直す方式にする。
+
+        有効化する瞬間の「今のタブ幅」を固定幅として記憶する
+        （既定幅にリセットしたりしない）。無効化時はこの記憶をクリアし、
+        以前と同じ比例配分（ストレッチ比 1:4）に戻す。
+        """
+        self._fixed_tab_width_enabled = fixed
+        if fixed:
+            sizes = self.main_splitter.sizes()
+            if len(sizes) == 2 and sizes[0] > 0:
+                self._fixed_tab_pane_width = sizes[0]
+            self.main_splitter.setStretchFactor(0, 0)
+            self.main_splitter.setStretchFactor(1, 1)
+        else:
+            self._fixed_tab_pane_width = None
+            self.main_splitter.setStretchFactor(0, 1)
+            self.main_splitter.setStretchFactor(1, 4)
+
+    def _on_splitter_moved(self, pos, index):
+        """
+        1.3.0.0: 縦タブ幅固定モード中、ユーザーが実際にスプリッターの
+        ハンドルをドラッグして幅を変えた場合は、その新しい幅を今後の
+        「維持すべき幅」として更新する。固定モードは「ウィンドウリサイズでは
+        変えない」であって「ユーザーが手で調整できない」ではないため。
+        """
+        if getattr(self, "_fixed_tab_width_enabled", False):
+            sizes = self.main_splitter.sizes()
+            if len(sizes) == 2 and sizes[0] > 0:
+                self._fixed_tab_pane_width = sizes[0]
+
+    def resizeEvent(self, event):
+        """
+        1.3.0.0: 縦タブ幅固定モードが有効な場合、ウィンドウリサイズの
+        たびにタブ側ペインの幅を明示的に再設定し、幅を維持する。
+
+        super().resizeEvent(event) を先に呼ぶことで、Qtのレイアウト
+        システムによる通常のジオメトリ再計算（self.main_splitter 自体の
+        幅の更新を含む）を済ませてから、その実際の幅を基準にタブ側の幅を
+        計算し直す（sizes() の合計ではなく width() を基準にする。sizes()
+        は最後に setSizes() で明示的に設定した値をそのまま返すだけで、
+        必ずしもウィジェットの実際の現在幅を反映するとは限らないため）。
+        """
+        super().resizeEvent(event)
+        if getattr(self, "_fixed_tab_width_enabled", False) and hasattr(self, "main_splitter"):
+            fixed_w = getattr(self, "_fixed_tab_pane_width", None)
+            if fixed_w:
+                handle_w = self.main_splitter.handleWidth()
+                if handle_w <= 0:
+                    handle_w = 1  # スタイル未解決時のフォールバック
+                total = self.main_splitter.width() - handle_w
+                second = max(total - fixed_w, 0)
+                self.main_splitter.setSizes([fixed_w, second])
+
     def init_ui(self):
         """UIの初期化"""
         self.setWindowTitle(f"{BROWSER_FULL_NAME}")
@@ -3222,12 +3613,41 @@ class VerticalTabBrowser(QMainWindow):
         browser_widget = self.create_browser_area()
         splitter.addWidget(browser_widget)
         
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 4)
+        # 1.3.0.0: 縦タブ幅固定モード。
+        # 参照を保持しておき、apply_settings() から設定変更時にも即座に
+        # 反映できるようにする（apply_settings() は __init__ で init_ui() より
+        # 先に一度呼ばれるため、その時点ではまだ self.main_splitter が
+        # 存在しない。そのため初期値はここで直接設定し、以降の設定変更分は
+        # apply_settings() 側の hasattr ガードで反映する）。
+        self.main_splitter = splitter
         splitter.setSizes([200, 1000])
+        self._apply_fixed_tab_width(
+            self.settings.value("fixed_tab_width", False, type=bool)
+        )
+        splitter.splitterMoved.connect(self._on_splitter_moved)
         
         main_layout.addWidget(splitter)
     
+    def _restore_muted_zoom(self, tab_data):
+        """
+        1.3.0.0: セッションデータの1タブ分の辞書から、保存されていた
+        ミュート状態・画面拡大率を取り出すヘルパー。
+
+        1.2.1.0 以前に保存されたセッションファイルには "muted" / "zoom"
+        キー自体が存在しないため、その場合は安全にデフォルト値
+        （ミュート無し・100%）にフォールバックする。万一値の型が
+        壊れている場合（手動編集等）も同様にフォールバックする。
+        """
+        muted = bool(tab_data.get("muted", False))
+        zoom = tab_data.get("zoom", 1.0)
+        try:
+            zoom = float(zoom)
+            if not (zoom > 0):  # 0以下・NaN は無効値としてデフォルトへ
+                zoom = 1.0
+        except (TypeError, ValueError):
+            zoom = 1.0
+        return muted, zoom
+
     def restore_session(self):
         """セッションを復元。初回起動時・更新時はウェルカムページを追加で表示する。"""
 
@@ -3256,7 +3676,8 @@ class VerticalTabBrowser(QMainWindow):
                             url = tab_data.get("url", "")
                             if not url or url.startswith("about:") or url.startswith("chrome:"):
                                 continue
-                            self.add_new_tab(url, activate=False)
+                            muted, zoom = self._restore_muted_zoom(tab_data)
+                            self.add_new_tab(url, activate=False, muted=muted, zoom=zoom)
                             restored_any = True
 
             self.add_new_tab("strollon://welcome", activate=True)
@@ -3292,7 +3713,8 @@ class VerticalTabBrowser(QMainWindow):
                             if not url or url.startswith("about:") or url.startswith("chrome:"):
                                 continue
                             activate = (i == active_index)
-                            self.add_new_tab(url, activate=activate)
+                            muted, zoom = self._restore_muted_zoom(tab_data)
+                            self.add_new_tab(url, activate=activate, muted=muted, zoom=zoom)
                             opened += 1
                         if opened > 0:
                             return
@@ -3326,7 +3748,12 @@ class VerticalTabBrowser(QMainWindow):
             normal_tab_indices.append(i)
             tabs_data.append({
                 "url": url,
-                "title": item.web_view.title() or ""
+                "title": item.web_view.title() or "",
+                # 1.3.0.0: ミュート状態と画面拡大率(Ctrl+ +/-/0)もタブ情報として
+                # 保存する。読み込み側は _restore_muted_zoom() で、これらの
+                # キーが無い古いセッションファイルにも対応する。
+                "muted": item.is_muted,
+                "zoom": self._zoom_levels.get(item.web_view, 1.0),
             })
 
         # アクティブタブのインデックスを正規化（除外後のインデックス）
@@ -3486,7 +3913,6 @@ class VerticalTabBrowser(QMainWindow):
     
     def show_update_notification(self, latest_version, message):
         """更新通知（今すぐ更新 / 後で確認）"""
-        from constants import BROWSER_TARGET_ARCHITECTURE
         from html import escape as _escape
 
         # latest_version/message は更新チェックサーバーからの応答値。
@@ -3783,18 +4209,6 @@ class VerticalTabBrowser(QMainWindow):
         self.add_new_tab("strollon://about", activate=True)
 
 
-    def _open_or_reload_downloads_page(self):
-        """strollon://downloads タブが既に開いていればリロード、なければ新規タブで開く。"""
-        target = "strollon://downloads"
-        for i in range(self.tab_list.count()):
-            item = self.tab_list.item(i)
-            if isinstance(item, TabItem) and item.web_view is not None:
-                if item.web_view.url().toString().startswith(target):
-                    item.web_view.reload()
-                    self.tab_list.setCurrentItem(item)
-                    return
-        self.add_new_tab(target, activate=True)
-
     def _start_downloads_page_refresh(self):
         """ダウンロード進行中に strollon://downloads タブをJS部分更新するタイマーを起動。"""
         if hasattr(self, '_dl_refresh_timer') and self._dl_refresh_timer.isActive():
@@ -3847,8 +4261,17 @@ class VerticalTabBrowser(QMainWindow):
                 break
 
     def show_download_dialog(self):
-        """ダウンロード一覧を新しいタブで開く"""
-        self.add_new_tab("strollon://downloads", activate=True)
+        """ダウンロード一覧を開く。strollon://downloads タブが既に開いていれば
+        そのタブに切り替えてリロードし、なければ新規タブで開く。"""
+        target = "strollon://downloads"
+        for i in range(self.tab_list.count()):
+            item = self.tab_list.item(i)
+            if isinstance(item, TabItem) and item.web_view is not None:
+                if item.web_view.url().toString().startswith(target):
+                    item.web_view.reload()
+                    self.tab_list.setCurrentItem(item)
+                    return
+        self.add_new_tab(target, activate=True)
     
     def save_page(self):
         """ページを保存（PNG / PDF）"""
@@ -4309,12 +4732,19 @@ class VerticalTabBrowser(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def add_new_tab(self, url, activate=True, incognito=False, _return_view=False):
+    def add_new_tab(self, url, activate=True, incognito=False, _return_view=False,
+                     muted=False, zoom=1.0):
         """
         新規タブ追加。
 
         _return_view=True の場合は作成した QWebEngineView を返す。
         createWindow からの呼び出し時に使用する内部フラグ。
+
+        muted / zoom:
+          1.3.0.0: セッション復元時に、保存されていたミュート状態・
+          画面拡大率を新規タブへ引き継ぐために使用する。呼び出し元を
+          省略した通常の新規タブ作成では、それぞれデフォルト値
+          （ミュート無し / 100%）のまま。
         """
         web_view = QWebEngineView()
 
@@ -4322,6 +4752,8 @@ class VerticalTabBrowser(QMainWindow):
         # 通常は self.profile、シークレットは self.incognito_profile
         profile = self.incognito_profile if incognito else self.profile
         page = CustomWebEnginePage(profile, web_view)
+        # 1.3.0.0 バグ修正: _find_browser() 参照。詳細はそちらのdocstring。
+        page._browser_ref = self
         page.fullScreenRequested.connect(self.handle_fullscreen_request)
         self._hook_explicit_save_actions(page)
         # window.print()（pdf.jsの印刷ボタン等を含む）はQtの「ページを保存」機能に委譲する
@@ -4349,6 +4781,10 @@ class VerticalTabBrowser(QMainWindow):
         web_view.loadFinished.connect(lambda: self.on_load_finished(web_view, incognito))
         web_view.loadStarted.connect(lambda: self.on_load_started(web_view))
         web_view.loadProgress.connect(lambda p: self.on_load_progress(web_view, p))
+        # 1.3.0.0: 音声再生中インジケータ（TabItemWidget.status_icon）用。
+        # ミュート中は status_icon 側でミュートアイコンが優先表示されるため、
+        # ここでの状態更新とミュート状態が競合することはない。
+        page.recentlyAudibleChanged.connect(lambda audible: self.on_audio_playing_changed(web_view, audible))
 
         # 中クリックで新タブ
         def _on_mouse_press(event, _wv=web_view):
@@ -4364,6 +4800,13 @@ class VerticalTabBrowser(QMainWindow):
         web_view.mousePressEvent = _on_mouse_press
 
         tab_item = TabItem("新しいタブ", web_view, incognito=incognito)
+
+        # 1.3.0.0: 保存されていたミュート状態・ズーム率があれば復元する
+        # （muted=False, zoom=1.0 の場合は従来通りのデフォルト動作）。
+        tab_item.is_muted = muted
+        page.setAudioMuted(muted)
+        tab_item.widget.set_muted(muted)
+        self._zoom_levels[web_view] = zoom
 
         self.tab_list.addItem(tab_item)
         self.tab_list.setItemWidget(tab_item, tab_item.widget)
@@ -4501,6 +4944,18 @@ class VerticalTabBrowser(QMainWindow):
                 if self.tab_list.currentItem() == item:
                     self.update_window_title(title)
                 break
+
+    def on_audio_playing_changed(self, web_view, audible):
+        """
+        1.3.0.0: ページの音声再生状態（QWebEnginePage.recentlyAudible）が
+        変化した際に呼ばれ、対応するタブの音声再生中アイコン表示を更新する。
+        """
+        for i in range(self.tab_list.count()):
+            item = self.tab_list.item(i)
+            if isinstance(item, TabItem) and item.web_view == web_view:
+                item.is_playing_audio = bool(audible)
+                item.widget.set_playing_audio(item.is_playing_audio)
+                break
     
     def update_url_bar(self, web_view, url):
         """URLバー更新"""
@@ -4515,9 +4970,18 @@ class VerticalTabBrowser(QMainWindow):
                     self.url_bar.home(False)
     
     def update_window_title(self, page_title):
-        """ウィンドウタイトルを更新"""
+        """
+        ウィンドウタイトルを更新。
+
+        1.3.0.0: 設定「window_title_page_only」が有効な場合、
+        " - Strollon" のようなブラウザ名の付加を行わず、ページタイトルの
+        みを表示する。ページタイトルが空の場合（about:blank 等）は、
+        空のタイトルバーにならないよう、このモードでも BROWSER_FULL_NAME に
+        フォールバックする。
+        """
+        page_only = getattr(self, "title_page_only", False)
         if page_title:
-            self.setWindowTitle(f"{page_title} - {BROWSER_FULL_NAME}")
+            self.setWindowTitle(page_title if page_only else f"{page_title} - {BROWSER_FULL_NAME}")
         else:
             self.setWindowTitle(BROWSER_FULL_NAME)
     
@@ -4693,9 +5157,24 @@ class VerticalTabBrowser(QMainWindow):
         if item.web_view is None:
             return
         
-        # タブが1つしかない場合はブラウザを閉じる
+        # タブが1つしかない場合、そのタブを閉じた（＝開いているタブが0枚に
+        # なった）うえでブラウザを閉じる。
+        # 1.3.0.0: 以前はここでタブリストからの削除を行わずに self.close() だけ
+        # 呼んでいたため、closeEvent() の save_current_session() が「閉じた
+        # はずのタブがまだ1枚残っている」状態のセッションを保存してしまい、
+        # 次回起動時にユーザーが明示的に閉じたタブが復元されてしまっていた。
+        # 通常の（タブが複数ある場合の）閉じる処理と同じ後始末を行ってから
+        # self.close() を呼ぶことで、この不整合を解消する。
         if self.tab_list.count() == 1:
             log("[INFO] TabControl: Close(Exit)")
+            for i in range(self.tab_list.count()):
+                if self.tab_list.item(i) == item:
+                    self.tab_list.takeItem(i)
+                    self._zoom_levels.pop(item.web_view, None)
+                    item.web_view.deleteLater()
+                    if item.web_view in self.tabs:
+                        self.tabs.remove(item.web_view)
+                    break
             self.close()
             return
         

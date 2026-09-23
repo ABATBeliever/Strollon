@@ -78,8 +78,8 @@ BROWSER_TARGET_ARCHITECTURE: str = f"{_detect_os_prefix()}-{_detect_arch_suffix(
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "1.2.0.0"
-BROWSER_VERSION_NAME     = "1.2.0.0 Stable"
+BROWSER_VERSION_SEMANTIC = "1.3.0.0"
+BROWSER_VERSION_NAME     = "1.3.0.0 Stable"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================
