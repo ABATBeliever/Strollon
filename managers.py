@@ -17,7 +17,8 @@ from constants import (
     HISTORY_DB, BOOKMARKS_DB, SESSION_FILE, DOWNLOADS_DB,
     BROWSER_VERSION_SEMANTIC, UPDATE_CHECK_URL,
     set_db_strollon_version,
-    stamp_version_to_json, check_version_stamp, VERSION_KEY, log
+    stamp_version_to_json, check_version_stamp, VERSION_KEY, log,
+    atomic_write_text, replace_file_atomic,
 )
 
 
@@ -452,11 +453,31 @@ class SessionManager:
         セッションを保存する。
         tabs_data は {"tabs": [...], "active_index": N} の辞書形式。
         バージョンスタンプを付与して保存する。
+
+        1.3.1.0 バグ修正（ASI-0014）: 一時ファイルに書き込んでから
+        os.replace() で本番ファイルに差し替える、アトミックな書き込みに
+        変更した。以前は session_file に直接 open(..., 'w') していた
+        ため、書き込みの途中で中断する（別プロセスが同時に同じ
+        session.json へ書き込んだ場合や、書き込み中にクラッシュ・強制
+        終了した場合等）と、不完全な（壊れた）JSONが残ってしまうことが
+        あった。load_session() はJSON読み込みに失敗すると黙って
+        「セッションなし」を返す実装のため、これが「前回開いていた
+        タブが復元されない」症状の原因になっていた。os.replace() は
+        同一ファイルシステム内であれば失敗しても元ファイルを破壊しない
+        （書き込み中の状態を外部から観測されることがない）。
         """
         try:
             stamped = stamp_version_to_json(tabs_data)
-            with open(self.session_file, 'w', encoding='utf-8') as f:
+            self.session_file.parent.mkdir(parents=True, exist_ok=True)
+            import os
+            tmp_path = self.session_file.with_name(
+                f"{self.session_file.name}.tmp-{os.getpid()}"
+            )
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(stamped, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.session_file)
             log(f"[INFO] Session saved: {len(tabs_data.get('tabs', []))} tabs")
         except Exception as e:
             log(f"[ERROR] Failed to save session: {e}")
@@ -818,8 +839,22 @@ class AdBlockManager:
             engine = _ab.Engine(fs, optimize=True)
 
             # シリアライズキャッシュを保存（次回起動が速くなる）
+            # 1.3.1.0: 一時ファイルへ書き出してから差し替える（アトミック）。
+            # 直接書くと、途中で終了した場合に壊れた adblock_engine.bin が
+            # 残り、次回起動時の高速ロードが失敗する。
+            import os, threading
             self._engine_path.parent.mkdir(parents=True, exist_ok=True)
-            engine.serialize_to_file(str(self._engine_path))
+            _tmp_engine = self._engine_path.with_name(
+                f"{self._engine_path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
+            )
+            try:
+                engine.serialize_to_file(str(_tmp_engine))
+                replace_file_atomic(_tmp_engine, self._engine_path)
+            finally:
+                try:
+                    _tmp_engine.unlink()
+                except OSError:
+                    pass
 
             # フィルタテキストから有効ルール数をカウント（コメント・空行・CSSセレクタ除外）
             self._rule_count = sum(
@@ -875,9 +910,10 @@ class AdBlockManager:
 
         # テキストを保存
         try:
-            self._filter_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._filter_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(all_lines))
+            # 1.3.1.0: アトミック書き込み（書き込み途中の中断で、切り詰められた
+            # フィルターファイルが残り、次回起動で不完全なルールから
+            # Engineを構築してしまうのを防ぐ）。
+            atomic_write_text(self._filter_path, "\n".join(all_lines))
         except Exception as e:
             message = f"保存に失敗しました: {e}"
             self._last_update_result = (False, message)

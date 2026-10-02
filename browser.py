@@ -51,7 +51,8 @@ _STROLLON_SETTINGS_ALLOWED_KEYS = frozenset({
     "do_not_track", "ssl_warn_dialog", "download_dir", "ask_download",
     "enable_javascript", "open_pdf_in_viewer", "allow_fullscreen", "auto_load_images",
     "enable_hardware_acceleration", "ua_preset", "ua_custom", "adblock_enabled",
-    "theme", "chromium_custom_args", "fixed_tab_width", "window_title_page_only",
+    "theme", "chromium_custom_args", "fixed_tab_width", "fixed_tab_width_px",
+    "window_title_page_only",
 }) | frozenset(CHROMIUM_FLAGS.keys())
 
 
@@ -282,6 +283,114 @@ def run_on_main_thread(fn):
         log("[WARN] _main_thread_invoker not initialized before use; creating lazily")
         _main_thread_invoker = _MainThreadInvoker()
     return _main_thread_invoker.call(fn)
+
+
+def start_single_instance_listener(server_name: str):
+    """
+    1.3.1.0: シングルインスタンス機構のサーバー起動（早期版）。
+
+    バグ修正（ASI-0014）: 以前は VerticalTabBrowser のメソッドとして、
+    ウィンドウ・QWebEngineProfile 一式を作り終えたあとで listen() して
+    いた。このため「既存インスタンスが無いことを確認 → 自分がlisten()
+    するまで」の間（ウィンドウ生成には実測で数百ms〜かかる）に2個目の
+    プロセスが起動すると、2個目も同様に「既存インスタンスが無い」と
+    誤認し、同じ persistentStoragePath を指す QWebEngineProfile を
+    2つのプロセスが同時に開いてしまっていた。
+    Qt公式ドキュメント（QWebEngineProfileBuilder）でも、同じ保存先を
+    指す複数プロファイルの同時使用は "can lead to corrupted browser
+    cache" と明記されている。実際にCookie（ログイン情報）が消える、
+    session.json（前回開いていたタブ）が壊れて復元されない、という
+    形で症状が出ていた。特にファイル/URLの関連付けで開いた場合に
+    再現しやすい（OS側の挙動によりほぼ同時に複数プロセスが起動し
+    得るため）。
+
+    この関数は、ウィンドウ・プロファイルを一切作る前、main() のごく
+    早い段階（「既存インスタンスへの接続」チェックの直後）で呼ぶこと。
+    listen() さえ済ませてしまえば「唯一のインスタンス」の座を実際に
+    確保できるため、競合の窓をこの関数の数行分だけに縮められる。
+
+    戻り値: (server, pending_messages, should_exit)
+      - server: listen()に成功した QLocalServer。以後
+        VerticalTabBrowser.adopt_single_instance_server() で実際の
+        ウィンドウへ所有権を引き継ぐこと。listen()に失敗し、かつ
+        既存インスタンスも見つからなかった場合は None
+        （シングルインスタンス機構なしで、保護されないまま続行する）。
+      - pending_messages: サーバー起動からウィンドウ生成までの間に
+        届いていたメッセージ（生の1行）のリスト。
+        adopt_single_instance_server() で再生させること。
+      - should_exit: True の場合、この一瞬の競合で別プロセスに
+        「唯一のインスタンス」の座を取られたことを意味する。呼び出し
+        側はウィンドウ・プロファイルを一切作らずに、この時点で
+        sys.exit(0) すること（何も作っていないので後始末は不要）。
+    """
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
+
+    server = QLocalServer()
+    pending_messages: list[str] = []
+
+    def _on_new_connection():
+        socket = server.nextPendingConnection()
+        if socket is None:
+            return
+
+        def _try_read():
+            if not socket.canReadLine():
+                return
+            try:
+                socket.readyRead.disconnect(_try_read)
+            except (RuntimeError, TypeError):
+                pass
+            line = bytes(socket.readLine()).decode("utf-8", errors="replace").strip()
+            pending_messages.append(line)
+            socket.disconnectFromServer()
+
+        socket.readyRead.connect(_try_read)
+        _try_read()
+
+    server.newConnection.connect(_on_new_connection)
+
+    if server.listen(server_name):
+        log(f"[INFO] SingleInstance: server listening as {server_name!r}")
+        return server, pending_messages, False
+
+    # listen()に失敗した。「本当に別プロセスが生きてlisten中」なのか、
+    # 「前回の異常終了等で残った古いソケット/名前付きパイプの残骸」
+    # なのかを、removeServer()でいきなり掃除する前にまず区別する。
+    #
+    # 1.3.1.0: 以前はここで無条件に QLocalServer.removeServer() を
+    # 先に呼んでから listen() していたが、これだと「別プロセスが実際に
+    # 生きてlisten中」の場合でも、そのソケットのパス自体を問答無用で
+    # 削除してしまう。生きているそのプロセス自身はソケットが消えた
+    # ことに気付かないまま動き続けるため、「ウィンドウは表示されて
+    # 動いているのに、以後IPC経由では誰からも二度と見つけられない
+    # インスタンス」を作ってしまいかねない。そこでまずクライアントと
+    # して接続を試み、応答があれば本当に生きた別プロセスだと判断して
+    # 何も壊さずに自分がここで退く。応答が無い場合にのみ「古い残骸」と
+    # みなして掃除する。
+    log(f"[WARN] SingleInstance: listen() failed: {server.errorString()}")
+    retry = QLocalSocket()
+    retry.connectToServer(server_name)
+    if retry.waitForConnected(300):
+        log("[WARN] SingleInstance: another instance is listening; "
+            "exiting before creating any window/profile.")
+        retry.disconnectFromServer()
+        return None, [], True
+
+    # 生きた別プロセスへの接続もできない＝古いソケットの残骸である
+    # 可能性が高い。ここで初めて掃除してから、もう一度だけ listen()
+    # を試みる（Windowsの名前付きパイプでは基本的に不要だが、
+    # Linux/macOSのUnixドメインソケットではこの掃除が必要になり得る）。
+    log("[WARN] SingleInstance: no live instance found either; "
+        "assuming a stale socket and retrying after cleanup.")
+    QLocalServer.removeServer(server_name)
+    if server.listen(server_name):
+        log(f"[INFO] SingleInstance: server listening as {server_name!r} (after cleanup)")
+        return server, pending_messages, False
+
+    log(f"[WARN] SingleInstance: listen() failed again after cleanup: "
+        f"{server.errorString()}")
+    log("[WARN] SingleInstance: proceeding without single-instance protection.")
+    return None, [], False
 
 
 def _build_welcome_html(version_name: str, install: bool, linux_package_kind=None) -> str:
@@ -659,6 +768,20 @@ def _build_welcome_html(version_name: str, install: bool, linux_package_kind=Non
           <p>Version {version_name} の変更内容です。</p>
         </div>
         <div class="release-scroll">
+          <h2>1.3.1.0 Stable</h2>
+          <ul>
+            <li><span class="tag tag-new">追加</span> Linuxでzstandardを使用するようになりました。</li>
+            <li><span class="tag tag-new">追加</span> 実験的なLinux aarch64のサポートを追加。</li>
+            <li><span class="tag tag-fix">改善</span> certifiパッケージを依存関係に明記。</li>
+            <li><span class="tag tag-fix">改善</span> 起動時にまれにログイン情報やセッションが読み込まれないバグ(ASI-0014)を修正。</li>
+            <li><span class="tag tag-fix">改善</span> タブサイズ固定で、画面とタブエリアの横スクロールができなくなる不具合(ASI-0015)を修正。</li>
+            <li><span class="tag tag-fix">改善</span> タブサイズ固定で、固定した幅が再起動後に保存されない仕様(ASI-0016)を変更。</li>
+            <li><span class="tag tag-fix">改善</span> 起動中にリンク等から2つ目のプロセスが起動した際、開いているPDFやログが削除・破棄されうる不具合(ASI-0017)を修正。
+</li>
+            <li><span class="tag tag-fix">改善</span> ページ内検索、ページ保存、ブックマーク追加ダイアログがメモリ上に残る不具合(ASI-0018)を修正。</li>
+            <li><span class="tag tag-fix">改善</span> 設定、テーマ、セッション、広告ブロックフィルターのファイルの読み書きを改良。</li>
+          </ul>
+          <hr>
           <h2>1.3.0.0 Stable</h2>
           <ul>
             <li><span class="tag tag-new">追加</span> 音声を再生中のタブにアイコンを表示するようにしました。</li>
@@ -3214,15 +3337,24 @@ class VerticalTabBrowser(QMainWindow):
         self._dnt_interceptor_incognito.set_dnt_enabled(self.do_not_track)
         log(f"[INFO] DNT header set to: {'1' if self.do_not_track else '0'}")
 
-        # 1.3.0.0: 縦タブ幅固定モード。
+        # 縦タブ幅固定モード。
         # __init__ では apply_settings() が init_ui() より先に呼ばれるため、
         # その最初の呼び出し時点ではまだ self.main_splitter が存在しない
         # （初期値は init_ui() 側で直接設定済み）。ここでは設定変更時の
         # 再適用としてのみ機能させるため、存在する場合だけ反映する。
+        # OFF→ON に切り替わった瞬間の幅を「維持すべき幅」として保存する
+        # （1.3.1.1: これが保存されていなかったのが2つ目の不具合）。
+        # 既にON中の再適用（他の設定変更に伴うapply_settings()の再実行等）
+        # では幅を変えない。
         if hasattr(self, "main_splitter"):
-            self._apply_fixed_tab_width(
-                self.settings.value("fixed_tab_width", False, type=bool)
-            )
+            fixed = self.settings.value("fixed_tab_width", False, type=bool)
+            was_fixed = getattr(self, "_fixed_tab_width_enabled", False)
+            if fixed and not was_fixed:
+                self._apply_fixed_tab_width(True)
+                self.settings.setValue("fixed_tab_width_px", self._fixed_tab_pane_width)
+                self.settings.sync()
+            elif not fixed and was_fixed:
+                self._apply_fixed_tab_width(False)
 
         # 1.3.0.0: ウィンドウタイトルをページタイトルのみにするモード。
         # update_window_title() から毎回設定を読み直す代わりにここでキャッシュし、
@@ -3529,67 +3661,40 @@ class VerticalTabBrowser(QMainWindow):
         except Exception as _e:
             log(f"[WARN] OS notification failed: {_e}")
     
-    def _apply_fixed_tab_width(self, fixed: bool):
+    def _apply_fixed_tab_width(self, fixed: bool, width: int | None = None):
         """
-        1.3.0.0: 縦タブ幅固定モードの適用/解除。
+        縦タブ幅固定モードの適用/解除。
 
-        QSplitter.setStretchFactor() は実際にはウィジェットの
-        QSizePolicy のストレッチ値を設定するだけの便宜関数で、
-        ウィンドウリサイズのたびにQSplitterが必ずその比率で再配分する
-        ことを保証するものではない（Qt公式ドキュメント上も「初期配分に
-        使われる」とあるのみ）。確実に「タブ側の幅を維持する」ためには、
-        resizeEvent() 側で明示的に setSizes() をやり直す方式にする。
+        1.3.1.1 バグ修正: 以前は QSplitter.setStretchFactor() や、独自の
+        resizeEvent() オーバーライドで毎回 setSizes() を計算し直す実装
+        だったが、実機で「画面・タブエリア双方で横スクロールができなく
+        なる」という重大な不具合が報告された。resizeEvent 内での手動の
+        setSizes() 呼び出しが、Qtの通常のレイアウト計算や
+        QWebEngineView側のジオメトリ・スクロール状態の更新と競合して
+        いたためと考えられる。
+        QWidget.setFixedWidth()（内部的には最小幅・最大幅を同じ値に
+        するだけ）というQtの標準的な機構に切り替え、独自の
+        resizeEvent()・splitterMoved 追跡は完全に廃止した。この方式
+        では、固定中はスプリッター自体が物理的にその方向へ動かせなく
+        なるため、手動ドラッグとの競合も原理的に起こり得ない。
 
-        有効化する瞬間の「今のタブ幅」を固定幅として記憶する
-        （既定幅にリセットしたりしない）。無効化時はこの記憶をクリアし、
-        以前と同じ比例配分（ストレッチ比 1:4）に戻す。
+        width を指定した場合はその幅（px）を固定幅として使う（起動時、
+        保存されていた幅を復元する場合）。省略した場合は、その時点の
+        タブパネルの実際の幅をそのまま固定幅として採用する（設定画面で
+        ライブに有効化した場合）。設定への保存はここでは行わない
+        （呼び出し元の責任。apply_settings() 参照）。
         """
         self._fixed_tab_width_enabled = fixed
-        if fixed:
-            sizes = self.main_splitter.sizes()
-            if len(sizes) == 2 and sizes[0] > 0:
-                self._fixed_tab_pane_width = sizes[0]
-            self.main_splitter.setStretchFactor(0, 0)
-            self.main_splitter.setStretchFactor(1, 1)
-        else:
+        if not fixed:
             self._fixed_tab_pane_width = None
-            self.main_splitter.setStretchFactor(0, 1)
-            self.main_splitter.setStretchFactor(1, 4)
-
-    def _on_splitter_moved(self, pos, index):
-        """
-        1.3.0.0: 縦タブ幅固定モード中、ユーザーが実際にスプリッターの
-        ハンドルをドラッグして幅を変えた場合は、その新しい幅を今後の
-        「維持すべき幅」として更新する。固定モードは「ウィンドウリサイズでは
-        変えない」であって「ユーザーが手で調整できない」ではないため。
-        """
-        if getattr(self, "_fixed_tab_width_enabled", False):
-            sizes = self.main_splitter.sizes()
-            if len(sizes) == 2 and sizes[0] > 0:
-                self._fixed_tab_pane_width = sizes[0]
-
-    def resizeEvent(self, event):
-        """
-        1.3.0.0: 縦タブ幅固定モードが有効な場合、ウィンドウリサイズの
-        たびにタブ側ペインの幅を明示的に再設定し、幅を維持する。
-
-        super().resizeEvent(event) を先に呼ぶことで、Qtのレイアウト
-        システムによる通常のジオメトリ再計算（self.main_splitter 自体の
-        幅の更新を含む）を済ませてから、その実際の幅を基準にタブ側の幅を
-        計算し直す（sizes() の合計ではなく width() を基準にする。sizes()
-        は最後に setSizes() で明示的に設定した値をそのまま返すだけで、
-        必ずしもウィジェットの実際の現在幅を反映するとは限らないため）。
-        """
-        super().resizeEvent(event)
-        if getattr(self, "_fixed_tab_width_enabled", False) and hasattr(self, "main_splitter"):
-            fixed_w = getattr(self, "_fixed_tab_pane_width", None)
-            if fixed_w:
-                handle_w = self.main_splitter.handleWidth()
-                if handle_w <= 0:
-                    handle_w = 1  # スタイル未解決時のフォールバック
-                total = self.main_splitter.width() - handle_w
-                second = max(total - fixed_w, 0)
-                self.main_splitter.setSizes([fixed_w, second])
+            self.tab_list_widget.setMinimumWidth(0)
+            self.tab_list_widget.setMaximumWidth(16777215)  # QWIDGETSIZE_MAX
+            return
+        target = width if width else self.tab_list_widget.width()
+        if not target or target <= 0:
+            target = 200
+        self._fixed_tab_pane_width = target
+        self.tab_list_widget.setFixedWidth(target)
 
     def init_ui(self):
         """UIの初期化"""
@@ -3613,18 +3718,22 @@ class VerticalTabBrowser(QMainWindow):
         browser_widget = self.create_browser_area()
         splitter.addWidget(browser_widget)
         
-        # 1.3.0.0: 縦タブ幅固定モード。
+        # 縦タブ幅固定モード。
         # 参照を保持しておき、apply_settings() から設定変更時にも即座に
         # 反映できるようにする（apply_settings() は __init__ で init_ui() より
         # 先に一度呼ばれるため、その時点ではまだ self.main_splitter が
         # 存在しない。そのため初期値はここで直接設定し、以降の設定変更分は
         # apply_settings() 側の hasattr ガードで反映する）。
+        # 1.3.1.1 バグ修正: 固定幅そのもの（fixed_tab_width_px）が保存
+        # されておらず、有効化して再起動すると毎回デフォルトの200pxに
+        # リセットされてしまっていた。保存されていた幅を読み込んで復元する。
         self.main_splitter = splitter
-        splitter.setSizes([200, 1000])
-        self._apply_fixed_tab_width(
-            self.settings.value("fixed_tab_width", False, type=bool)
-        )
-        splitter.splitterMoved.connect(self._on_splitter_moved)
+        saved_width = self.settings.value("fixed_tab_width_px", 200, type=int)
+        if not saved_width or saved_width <= 0:
+            saved_width = 200
+        initial_fixed = self.settings.value("fixed_tab_width", False, type=bool)
+        splitter.setSizes([saved_width if initial_fixed else 200, 1000])
+        self._apply_fixed_tab_width(initial_fixed, saved_width if initial_fixed else None)
         
         main_layout.addWidget(splitter)
     
@@ -4187,7 +4296,12 @@ class VerticalTabBrowser(QMainWindow):
         current_item = self.tab_list.currentItem()
         if current_item and isinstance(current_item, TabItem):
             dialog = FindDialog(current_item.web_view, self)
-            dialog.exec()
+            try:
+                dialog.exec()
+            finally:
+                # 1.3.1.0: 親(self)付きの QDialog は exec() が戻っても破棄されず、
+                # 呼ぶたびにメインウィンドウの子として蓄積していた。
+                dialog.deleteLater()
     
     def _reload_settings_tab_slot(self):
         """strollon://settings タブをメインスレッドでリロードするスロット。"""
@@ -4278,7 +4392,10 @@ class VerticalTabBrowser(QMainWindow):
         current_item = self.tab_list.currentItem()
         if current_item and isinstance(current_item, TabItem):
             dialog = SavePageDialog(current_item.web_view, self)
-            dialog.exec()
+            try:
+                dialog.exec()
+            finally:
+                dialog.deleteLater()  # 1.3.1.0: 蓄積防止（find_in_page 参照）
 
 
     def add_bookmark_from_current_tab(self):
@@ -4289,15 +4406,16 @@ class VerticalTabBrowser(QMainWindow):
             title = current_item.web_view.title() or "無題"
             folders = self.bookmark_manager.get_folders()
             dialog = AddBookmarkDialog(title, url, folders, self)
-            
-            if dialog.exec():
-                result = dialog.get_result()
-                if result:
-                    self.bookmark_manager.add_bookmark(
-                        result["title"], 
-                        result["url"], 
-                        result["folder"]
-                    )
+            try:
+                result = dialog.get_result() if dialog.exec() else None
+            finally:
+                dialog.deleteLater()  # 1.3.1.0: 蓄積防止（find_in_page 参照）
+            if result:
+                self.bookmark_manager.add_bookmark(
+                    result["title"],
+                    result["url"],
+                    result["folder"]
+                )
     
     def create_tab_list(self):
         """タブリスト作成"""
@@ -4503,7 +4621,8 @@ class VerticalTabBrowser(QMainWindow):
             return self.get_search_url(text)
 
     # =================================================================
-    # 1.2.0.0-rc1: コマンドライン引数の解釈（実験的機能）
+    # コマンドライン引数の解釈（1.1.0.0で導入。1.2.0.0の既定のブラウザ
+    # 対応以降、Windows/Linuxの関連付け起動で日常的に使われる経路）
     # =================================================================
     # 既定のブラウザに指定された場合、Windowsは
     #     "Strollon.exe" "<URLまたはファイルパス>"
@@ -4624,60 +4743,37 @@ class VerticalTabBrowser(QMainWindow):
             self.add_new_tab(target, activate=(i == len(targets) - 1))
 
     # =================================================================
-    # 1.2.0.0-rc1: シングルインスタンス化 － サーバー側（実験的機能）
+    # シングルインスタンス化 － サーバー側
     # =================================================================
-    # 自分が「唯一のインスタンス」である場合、Strollon.py の main() から
-    # start_single_instance_server() が呼ばれ、以後2個目以降のプロセス
-    # からのCLI引数転送を受け取れるようになる。
-    #
-    # 通信内容はJSON配列（生のCLI引数のリスト）1行＋改行のみ。中身は
-    # resolve_cli_arg() / open_cli_targets() に丸ごと渡されるため、
-    # 通常のCLI起動と全く同じ検証（スキームのホワイトリスト等）を経る。
-    # つまりIPC経由だからといって特別扱い＝信頼して良い入力には
-    # ならない。
+    # サーバー自体の起動（listen）は、Strollon.py の main() 側で
+    # start_single_instance_listener()（モジュール関数）を使って、
+    # ウィンドウ・プロファイルを作る前のごく早い段階で行う（経緯は
+    # そちらのdocstring参照、ASI-0014）。ここにある
+    # adopt_single_instance_server() は、そうして先に確保しておいた
+    # サーバーの所有権と、その間に届いていたメッセージをこのウィンドウ
+    # へ引き継ぐだけの処理。IPC通信の中身・信頼性についてはStrollon.py
+    # のシングルインスタンス化セクション冒頭のコメント参照。
     # =================================================================
 
-    def start_single_instance_server(self, server_name: str) -> None:
+    def adopt_single_instance_server(self, server, pending_messages) -> None:
         """
-        シングルインスタンスサーバーを起動する。
-        Strollon.py の main() から、ウィンドウ生成後に一度だけ呼ばれる。
+        start_single_instance_listener() で先に確保しておいたサーバーを
+        このウィンドウに引き継ぐ。server が None の場合（listen()に失敗し、
+        かつ既存インスタンスも見つからなかった場合）は、保護なしで続行する。
         """
-        from PySide6.QtNetwork import QLocalServer
-
-        # 前回の異常終了等で、OS側にソケット/名前付きパイプの残骸が
-        # 残っている場合に備えて、listen() の前に必ず掃除しておく
-        # （Windowsの名前付きパイプでは基本的に不要だが、Linux/macOSの
-        # Unixドメインソケットではこれを怠るとlisten()が失敗し得る）。
-        QLocalServer.removeServer(server_name)
-
-        self._single_instance_server = QLocalServer(self)
-        self._single_instance_server.newConnection.connect(
-            self._on_single_instance_connection
-        )
-
-        if self._single_instance_server.listen(server_name):
-            log(f"[INFO] SingleInstance: server listening as {server_name!r}")
+        self._single_instance_server = server
+        if server is None:
             return
-
-        # listen()に失敗した場合（起動直後の極めて短い競合状態で、
-        # 別プロセスに「唯一のインスタンス」の座を取られた等）は、
-        # もう一度クライアントとして接続を試み、成功すれば自分は
-        # このプロセスを終了する。それも失敗する場合は、シングル
-        # インスタンス機構なしで（保護されない状態のまま）通常通り
-        # 動作を続ける。
-        log(f"[WARN] SingleInstance: listen() failed: "
-            f"{self._single_instance_server.errorString()}")
-        from PySide6.QtNetwork import QLocalSocket
-        _retry = QLocalSocket()
-        _retry.connectToServer(server_name)
-        if _retry.waitForConnected(300):
-            log("[WARN] SingleInstance: another instance won the race; "
-                "closing this window instead.")
-            _retry.disconnectFromServer()
-            # 既にウィンドウ・各種プロファイル等を生成済みのタイミング
-            # のため、sys.exit() ではなくアプリケーションの終了処理に
-            # 委ねる（closeEvent 経由でクリーンアップされる）。
-            QTimer.singleShot(0, self.close)
+        server.setParent(self)
+        try:
+            server.newConnection.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        server.newConnection.connect(self._on_single_instance_connection)
+        # サーバー起動からここまでの間に届いていたメッセージを、通常の
+        # 受信経路（_apply_single_instance_message）にそのまま流す。
+        for raw_line in pending_messages:
+            self._apply_single_instance_message(raw_line)
 
     def _on_single_instance_connection(self) -> None:
         """2個目以降のプロセスからの接続を受理し、メッセージを読み取る。"""
@@ -5221,15 +5317,16 @@ class VerticalTabBrowser(QMainWindow):
             
             folders = self.bookmark_manager.get_folders()
             dialog = AddBookmarkDialog(title, url, folders, self)
-            
-            if dialog.exec():
-                result = dialog.get_result()
-                if result:
-                    self.bookmark_manager.add_bookmark(
-                        result["title"], 
-                        result["url"], 
-                        result["folder"]
-                    )
+            try:
+                result = dialog.get_result() if dialog.exec() else None
+            finally:
+                dialog.deleteLater()  # 1.3.1.0: 蓄積防止（find_in_page 参照）
+            if result:
+                self.bookmark_manager.add_bookmark(
+                    result["title"],
+                    result["url"],
+                    result["folder"]
+                )
     
     def toggle_mute(self, item):
         """タブのミュート状態を切り替え"""
@@ -5336,34 +5433,6 @@ class VerticalTabBrowser(QMainWindow):
                 log("[WARN] 更新チェックが5秒以内に終わらなかったため、"
                     "完了を待たずに終了処理を続行します")
 
-        # シークレットタブのPDFキャッシュを確実に削除
-        # -----------------------------------------------------------------
-        # 1.1.0.0 でシークレットタブの QWebEngineProfile を完全オフレコ化
-        # したため、Cookie/LocalStorage/IndexedDB/HTTPキャッシュ等はそもそも
-        # ディスクに書かれておらず、Qt側APIでの明示クリア（旧: cookieStore().
-        # deleteAllCookies() / clearHttpCache()）は不要になった。
-        # 一方 strollon-pdf:// ビューア用のPDFキャッシュ（INCOGNITO_CACHE_PATH）
-        # はStrollon独自の仕組みでディスクに書いているため、引き続き
-        # 明示的な削除が必要。rmtreeだけに頼るとファイルがロックされたままで
-        # 失敗し残留することがあるため、あくまでベストエフォート。起動時にも
-        # 同じ処理を行い、削除漏れがあれば次回起動時に確実に消す二重の
-        # 安全網にしている。
-        import shutil as _shutil
-        for _incognito_path in (INCOGNITO_CACHE_PATH,):
-            try:
-                if _incognito_path.exists():
-                    _shutil.rmtree(_incognito_path, ignore_errors=True)
-                    log(f"[INFO] Incognito data removed: {_incognito_path}")
-            except Exception as _e:
-                log(f"[WARN] Failed to remove incognito data {_incognito_path}: {_e}")
-
-        # 通常プロファイルのPDFキャッシュも終了時にクリア（起動時にも再度クリアされる）
-        try:
-            clear_pdf_cache(CACHE_DIR)
-            log("[INFO] PDF cache cleared (shutdown)")
-        except Exception as _e:
-            log(f"[WARN] Failed to clear PDF cache: {_e}")
-
         # ------------------------------------------------------------------
         # 全タブの QWebEngineView / QWebEnginePage を、共有プロファイル
         # (self.profile / self.incognito_profile) より確実に先に破棄する。
@@ -5427,5 +5496,41 @@ class VerticalTabBrowser(QMainWindow):
                 QApplication.processEvents()
         except Exception as _e:
             log(f"[WARN] Failed to tear down tabs/profiles cleanly: {_e}")
+
+        # -----------------------------------------------------------------
+        # キャッシュ削除は「全ビュー・ページ・プロファイルの破棄が終わった後」に行う
+        # -----------------------------------------------------------------
+        # 1.3.1.0: 以前はタブ破棄より前（ここより上）で行っていた。その時点では
+        # WebEngine がまだ PDF キャッシュ(strollon-pdf:// で配信中)や
+        # シークレット用ディレクトリのファイルを開いたままのため、特に Windows
+        # で rmtree が失敗して残留していた。破棄後に行うことでロックが外れた状態で
+        # 確実に削除できる（起動時の削除は二重の安全網として残している）。
+        # シークレットタブのPDFキャッシュを確実に削除
+        # -----------------------------------------------------------------
+        # 1.1.0.0 でシークレットタブの QWebEngineProfile を完全オフレコ化
+        # したため、Cookie/LocalStorage/IndexedDB/HTTPキャッシュ等はそもそも
+        # ディスクに書かれておらず、Qt側APIでの明示クリア（旧: cookieStore().
+        # deleteAllCookies() / clearHttpCache()）は不要になった。
+        # 一方 strollon-pdf:// ビューア用のPDFキャッシュ（INCOGNITO_CACHE_PATH）
+        # はStrollon独自の仕組みでディスクに書いているため、引き続き
+        # 明示的な削除が必要。rmtreeだけに頼るとファイルがロックされたままで
+        # 失敗し残留することがあるため、あくまでベストエフォート。起動時にも
+        # 同じ処理を行い、削除漏れがあれば次回起動時に確実に消す二重の
+        # 安全網にしている。
+        import shutil as _shutil
+        for _incognito_path in (INCOGNITO_CACHE_PATH,):
+            try:
+                if _incognito_path.exists():
+                    _shutil.rmtree(_incognito_path, ignore_errors=True)
+                    log(f"[INFO] Incognito data removed: {_incognito_path}")
+            except Exception as _e:
+                log(f"[WARN] Failed to remove incognito data {_incognito_path}: {_e}")
+
+        # 通常プロファイルのPDFキャッシュも終了時にクリア（起動時にも再度クリアされる）
+        try:
+            clear_pdf_cache(CACHE_DIR)
+            log("[INFO] PDF cache cleared (shutdown)")
+        except Exception as _e:
+            log(f"[WARN] Failed to clear PDF cache: {_e}")
 
         event.accept()

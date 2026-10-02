@@ -129,7 +129,7 @@ class ThemeEngine:
     def _get_ini_strollon_version(self, path: Path) -> str:
         """INI の [info] セクションから strollon_version を読む。なければ空文字を返す。"""
         try:
-            cfg = configparser.ConfigParser()
+            cfg = configparser.ConfigParser(interpolation=None)
             cfg.read(str(path), encoding="utf-8")
             return cfg.get("info", "strollon_version", fallback="")
         except Exception:
@@ -189,7 +189,10 @@ class ThemeEngine:
             self._current_theme = "Default"
             return False
 
-        cfg = configparser.ConfigParser()
+        # 1.3.1.0: interpolation=None。既定では値中の "%" が補間構文として扱われ、
+        # テーマINIに hsl(200, 50%, 50%) のような値を書くと、下の
+        # cfg["colors"].items() で（try の外で）例外となりテーマ読込が落ちた。
+        cfg = configparser.ConfigParser(interpolation=None)
         try:
             cfg.read(str(ini_path), encoding="utf-8")
         except Exception as e:

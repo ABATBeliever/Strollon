@@ -1,7 +1,7 @@
 # Strollon WebBrowser - インターネットを散歩しよう
 
 ![License](https://img.shields.io/badge/license-LGPLv3-blue.svg)
-![Version](https://img.shields.io/badge/version-1.3.0.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.3.1.0-green.svg)
 ![Status](https://img.shields.io/badge/status-Stable-orange.svg)
 ![Language](https://img.shields.io/badge/Language-Python-yellow.svg)
 
@@ -59,9 +59,8 @@ XDGに準拠、またはポータブルもOK
 
 | OS                         | アーキテクチャ | ディスプレイサーバー |対応状況|
 |----------------------------|----------------|----------------------|--------|
-| Windows 10 以降 (11 推奨)   | x64            | -                    | 対応済 |
+| Windows 10 以降 (11 推奨)  | x64            | -                    | 対応済 |
 | Linux                      | x64            | Wayland (推奨) / X11 | 対応済 |
-| Linux                      | aarch64        | Wayland (推奨) / X11 | 1.4.0.0より対応予定 |
 
 ---
 

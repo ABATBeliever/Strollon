@@ -26,7 +26,9 @@
 
 import sys
 import os
+import threading
 import logging
+import logging.handlers
 import platform
 from pathlib import Path
 
@@ -78,8 +80,8 @@ BROWSER_TARGET_ARCHITECTURE: str = f"{_detect_os_prefix()}-{_detect_arch_suffix(
 # =====================================================================
 
 BROWSER_NAME             = "Strollon"
-BROWSER_VERSION_SEMANTIC = "1.3.0.0"
-BROWSER_VERSION_NAME     = "1.3.0.0 Stable"
+BROWSER_VERSION_SEMANTIC = "1.3.1.0"
+BROWSER_VERSION_NAME     = "1.3.1.0 Stable"
 BROWSER_FULL_NAME        = f"{BROWSER_NAME} {BROWSER_VERSION_NAME}"
 
 # =====================================================================
@@ -312,7 +314,9 @@ def _check_is_updated() -> bool:
     if not path.exists():
         return False  # ファイルがない = IS_FIRST_RUN が先に検出するはずだが念のため
     try:
-        cfg = configparser.ConfigParser()
+        # interpolation=None: 値中の "%" を補間構文として解釈させない
+        # （詳細は StrollonSettings._load_ini のコメント参照）
+        cfg = configparser.ConfigParser(interpolation=None)
         cfg.read(str(path), encoding="utf-8")
         # セクションが存在しない = 旧形式 → 更新扱い
         if not cfg.has_section("strollon"):
@@ -402,18 +406,57 @@ def _setup_logger() -> logging.Logger:
     ch.setFormatter(fmt)
     _logger.addHandler(ch)
 
-    try:
-        fh = logging.FileHandler(str(LOG_FILE), mode="w", encoding="utf-8")
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(fmt)
-        _logger.addHandler(fh)
-    except OSError as e:
-        _logger.warning(f"ログファイルを開けません: {e}")
+    # 1.3.1.0: ログファイルは「自分が唯一のインスタンスだと確定した後」に
+    # activate_log_file() で初めて開く。以前はここで mode="w" のまま即座に
+    # 開いていたため、2個目のプロセス（リンク経由の起動など）が、起動中の
+    # インスタンスのログを import 時点で切り詰めてしまっていた。
+    # それまでのログはメモリに溜め、ファイルを開いた時点でまとめて書き出す。
+    global _log_buffer_handler
+    _log_buffer_handler = logging.handlers.MemoryHandler(
+        capacity=5000, flushLevel=logging.CRITICAL + 1, target=None
+    )
+    _log_buffer_handler.setLevel(logging.DEBUG)
+    _logger.addHandler(_log_buffer_handler)
 
     return _logger
 
 
+_log_buffer_handler = None
+_log_file_active = False
+
 logger = _setup_logger()
+
+
+def activate_log_file(truncate: bool = True):
+    """
+    ログファイルを開き、それまでメモリに溜めていたログを書き出す。
+
+    truncate=True  : 起動ごとに上書き（従来の挙動）。シングルインスタンス判定を
+                     通過し、自分が唯一のインスタンスだと確定した後に呼ぶこと。
+    truncate=False : 追記モード。判定前にクラッシュした場合など、他プロセスの
+                     ログを壊さずに記録だけ残したいときに使う。
+    2回目以降の呼び出しは何もしない。2個目のプロセスのように、判定前に終了する
+    場合はそもそも呼ばれず、ログファイルには一切触れない。
+    """
+    global _log_file_active
+    if _log_file_active:
+        return
+    _log_file_active = True
+    try:
+        fh = logging.FileHandler(
+            str(LOG_FILE), mode="w" if truncate else "a", encoding="utf-8"
+        )
+    except OSError as e:
+        logger.warning(f"ログファイルを開けません: {e}")
+        return
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
+    if _log_buffer_handler is not None:
+        _log_buffer_handler.setTarget(fh)
+        _log_buffer_handler.flush()
+        logger.removeHandler(_log_buffer_handler)
+        _log_buffer_handler.close()
+    logger.addHandler(fh)
 
 
 def log(msg: str):
@@ -428,6 +471,53 @@ def log(msg: str):
         logger.warning(msg)
     else:
         logger.info(msg)
+
+
+# =====================================================================
+# アトミックなファイル書き込み
+# =====================================================================
+# 1.3.1.0: 設定ファイル・広告ブロックフィルター等の書き込みに使う共通ヘルパー。
+# 一時ファイルに書き切って fsync してから os.replace() で差し替えるため、
+# 書き込み途中のクラッシュ・強制終了・別プロセスとの同時書き込みがあっても、
+# 本番ファイルが「途中まで書かれた壊れた状態」になることはない。
+# 一時ファイル名に PID とスレッドIDを含めるので、同一プロセス内の複数スレッド
+# （メインスレッドと広告ブロック更新スレッド等）が同時に書いても衝突しない。
+
+def replace_file_atomic(src, dst, attempts: int = 5, delay: float = 0.05):
+    """
+    os.replace() のリトライ付きラッパー。Windowsでは、ウイルス対策ソフトや
+    インデクサが一瞬ファイルを掴んでいるだけで PermissionError になることが
+    あるため、短い間隔で数回だけ再試行する。
+    """
+    import time as _time
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            _time.sleep(delay)
+
+
+def atomic_write_text(path, text: str, encoding: str = "utf-8"):
+    """text を path へアトミックに書き込む。失敗時は一時ファイルを残さない。"""
+    import threading as _threading
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{_threading.get_ident()}")
+    try:
+        with open(tmp, "w", encoding=encoding) as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        replace_file_atomic(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 # =====================================================================
@@ -485,24 +575,42 @@ class StrollonSettings:
 
     def __init__(self):
         self._data: dict = {}
+        # 1.3.1.0: スレッド安全化。広告ブロック更新スレッドなどが setValue()/sync()
+        # を呼ぶ一方、メインスレッドも設定を書き換えるため、以前は
+        #   ・_data の変更と保存時のイテレーションが衝突して保存が失敗する
+        #   ・2スレッドの sync() が交錯し、古い内容で新しい内容を上書きする
+        # 可能性があった。ロックは2つに分け、役割を明確にしている。
+        #   _lock    : _data の読み書き・スナップショット取得を守る（保持は一瞬）
+        #   _io_lock : ファイルへの書き込み全体を直列化する（fsyncを含み長い）
+        # value() はロックを取らない。strollon:// の広告ブロック判定のように
+        # リクエスト毎にIOスレッドから呼ばれる経路が、ディスク書き込み
+        # (fsync)の完了待ちで止まらないようにするため（dict.get は
+        # GIL下で原子的なので安全）。ロック順序は常に _io_lock → _lock。
+        self._lock = threading.RLock()
+        self._io_lock = threading.Lock()
         self._load()
 
     def _current_path(self) -> Path:
         return CONFIG_FILE
 
     def _load(self):
-        self._data = {}
-        path = self._current_path()
-        if not path.exists():
-            return
-        try:
-            self._load_ini(path)
-        except Exception as e:
-            log(f"[WARN] 設定ファイルの読み込みに失敗しました: {e}")
+        with self._lock:
+            self._data = {}
+            path = self._current_path()
+            if not path.exists():
+                return
+            try:
+                self._load_ini(path)
+            except Exception as e:
+                log(f"[WARN] 設定ファイルの読み込みに失敗しました: {e}")
 
     def _load_ini(self, path: Path):
         import configparser
-        cfg = configparser.ConfigParser()
+        # 1.3.1.0: interpolation=None を指定。ConfigParser は既定で値中の "%" を
+        # 補間構文として扱うため、"%" を含む値（例: https://example.com/a%20b
+        # のようなURL）は読み込み時に InterpolationSyntaxError となり、設定
+        # ファイル全体が読めず全設定が既定値に戻る原因になり得た。
+        cfg = configparser.ConfigParser(interpolation=None)
         cfg.read(str(path), encoding="utf-8")
         if cfg.has_section("strollon"):
             self._data = dict(cfg["strollon"])
@@ -510,14 +618,27 @@ class StrollonSettings:
     def reload(self):
         self._load()
 
-    def _save_ini(self, path: Path):
+    def _save_ini(self, path: Path, data: dict | None = None):
         import configparser
-        cfg = configparser.ConfigParser()
+        import io
+        # 1.3.1.0: interpolation=None を指定。既定のままだと cfg.set() が
+        # "%" を含む値で ValueError を送出し、sync() 全体が失敗して「設定画面
+        # では保存成功に見えるのに、実際には何も保存されない」状態になっていた。
+        cfg = configparser.ConfigParser(interpolation=None)
         cfg.add_section("strollon")
-        for k, v in self._data.items():
+        # data にはロック下で取得したスナップショットが渡される（sync() 参照）。
+        # 直接呼ばれた場合のみ、その場でスナップショットを取る。
+        if data is None:
+            with self._lock:
+                data = dict(self._data)
+        for k, v in data.items():
             cfg.set("strollon", k, str(v))
-        with open(path, "w", encoding="utf-8") as f:
-            cfg.write(f)
+        # 1.3.1.0: アトミック書き込み。以前は open(path, "w") で直接書いていた
+        # ため、書き込み途中の中断で設定ファイルが壊れ、次回起動時に
+        # 全設定が既定値へ戻ってしまうことがあった。
+        buf = io.StringIO()
+        cfg.write(buf)
+        atomic_write_text(path, buf.getvalue())
 
     def value(self, key: str, default=None, type=None):  # noqa: A002
         """
@@ -550,20 +671,29 @@ class StrollonSettings:
         return raw
 
     def setValue(self, key: str, val):
-        self._data[key] = val
+        with self._lock:
+            self._data[key] = val
 
     def sync(self):
         path = self._current_path()
-        # ブラウザバージョンを設定ファイルに記録（更新検出に使用）
-        self._data["_browser_version"] = BROWSER_VERSION_SEMANTIC
-        try:
-            self._save_ini(path)
-            log("[INFO] Settings saved")
-        except Exception as e:
-            log(f"[ERROR] 設定ファイルの書き込みに失敗しました: {e}")
+        # スナップショット取得から書き込み完了までを _io_lock で直列化する。
+        # スナップショットを _io_lock の「内側」で取ることで、複数スレッドの
+        # sync() が重なっても、後から呼んだ側が常により新しい内容を書く
+        # （古いスナップショットが後から書き込まれて巻き戻る事態を防ぐ）。
+        with self._io_lock:
+            with self._lock:
+                # ブラウザバージョンを設定ファイルに記録（更新検出に使用）
+                self._data["_browser_version"] = BROWSER_VERSION_SEMANTIC
+                snapshot = dict(self._data)
+            try:
+                self._save_ini(path, snapshot)
+                log("[INFO] Settings saved")
+            except Exception as e:
+                log(f"[ERROR] 設定ファイルの書き込みに失敗しました: {e}")
 
     def allKeys(self) -> list:
-        return list(self._data.keys())
+        with self._lock:
+            return list(self._data.keys())
 
 
 settings = StrollonSettings()
@@ -733,6 +863,10 @@ def main():
 
     # ---- Python 未処理例外をログファイルに記録してから終了 ----
     def _excepthook(exc_type, exc_value, exc_tb):
+        # シングルインスタンス判定前のクラッシュでも記録が残るよう、まだ
+        # ログファイルが開かれていなければ追記モードで開く（他プロセスの
+        # ログを切り詰めないため truncate=False）。
+        activate_log_file(truncate=False)
         msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         log(f"[CRITICAL] Unhandled exception:\n{msg}")
         sys.__excepthook__(exc_type, exc_value, exc_tb)
@@ -750,33 +884,6 @@ def main():
 
     from browser import apply_chromium_flags_from_settings
     apply_chromium_flags_from_settings()
-
-    # ---- PDFキャッシュを起動時にクリア（終了時にも closeEvent でクリアする）----
-    try:
-        from pdf_viewer import clear_pdf_cache
-        clear_pdf_cache(CACHE_DIR)
-        log("[INFO] PDF cache cleared (startup)")
-    except Exception as e:
-        log(f"[WARN] PDF cache clear failed: {e}")
-
-    # ---- シークレットタブのPDFキャッシュ残留物を起動時にも削除 ----
-    # 1.1.0.0 でシークレットタブの QWebEngineProfile を完全オフレコ化した
-    # ため、Chromium側のCookie/LocalStorage/HTTPキャッシュはそもそも
-    # ディスクに書かれなくなった。ただし strollon-pdf:// ビューア用の
-    # PDFキャッシュ（INCOGNITO_CACHE_PATH）はStrollon独自の仕組みで
-    # ディスクに書く必要があるため、こちらは引き続き掃除が必要。
-    # closeEvent でも削除を試みているが、終了時点ではファイルハンドルが
-    # 残っていることがあり（特にWindows）、ignore_errors=True で失敗が
-    # 握りつぶされて残留することがあった。起動時（＝どのファイルも
-    # 開かれていないタイミング）にも必ず掃除することで削除漏れを解消する。
-    import shutil as _shutil
-    for _incognito_leftover in (INCOGNITO_CACHE_PATH,):
-        try:
-            if _incognito_leftover.exists():
-                _shutil.rmtree(_incognito_leftover, ignore_errors=True)
-                log(f"[INFO] Incognito leftover data cleared (startup): {_incognito_leftover}")
-        except Exception as e:
-            log(f"[WARN] Incognito leftover clear failed: {e}")
 
     app = QApplication(sys.argv)
 
@@ -826,7 +933,61 @@ def main():
         sys.exit(0)
     # 接続失敗＝起動中のインスタンスが無い（と思われる）ので、
     # 自分がその唯一のインスタンスとして通常起動を続ける。
-    # サーバー自体の起動（listen）はウィンドウ生成後に行う。
+    #
+    # 1.3.1.0 バグ修正（ASI-0014）: サーバーの起動（listen）は、以前は
+    # ウィンドウ・QWebEngineProfile一式を作り終えたあとで行っていた。
+    # そのため「ここまでの接続チェック」から「自分がlisten()する」までの
+    # 間（ウィンドウ生成には実測で数百ms〜かかる）に2個目のプロセスが
+    # 起動すると、2個目も同様に「既存インスタンスが無い」と誤認し、
+    # 同じ persistentStoragePath を指す QWebEngineProfile を2つの
+    # プロセスが同時に開いてしまい、Cookie（ログイン情報）や
+    # session.json（前回開いていたタブ）が破損することがあった。
+    # 特にファイル/URLの関連付けで開いた場合に再現しやすい。
+    # ここでウィンドウ・プロファイルより先にlisten()まで済ませることで、
+    # 競合の窓をこの関数呼び出し自体の一瞬にまで縮める。
+    from browser import start_single_instance_listener
+    _single_instance_server, _single_instance_pending, _should_exit = \
+        start_single_instance_listener(_SINGLE_INSTANCE_NAME)
+    if _should_exit:
+        sys.exit(0)
+
+    # =================================================================
+    # ここから先は「自分が唯一のインスタンス」と確定している。
+    # =================================================================
+    # 1.3.1.0 バグ修正: 以下の起動時クリーンアップ（PDFキャッシュ・シークレット
+    # キャッシュの削除）とログファイルの上書きは、以前はシングルインスタンス
+    # 判定より前に実行されていた。そのため、リンク経由などで2個目のプロセスが
+    # 起動されるたびに、判定で終了する前に「起動中のインスタンスが使用中の
+    # キャッシュ・ログ」が削除/切り詰められ、開いているPDFタブが再読み込みや
+    # 表示に失敗する不具合があった。必ず判定を通過した後に行うこと。
+    activate_log_file(truncate=True)
+
+    # ---- PDFキャッシュを起動時にクリア（終了時にも closeEvent でクリアする）----
+    try:
+        from pdf_viewer import clear_pdf_cache
+        clear_pdf_cache(CACHE_DIR)
+        log("[INFO] PDF cache cleared (startup)")
+    except Exception as e:
+        log(f"[WARN] PDF cache clear failed: {e}")
+
+    # ---- シークレットタブのPDFキャッシュ残留物を起動時にも削除 ----
+    # 1.1.0.0 でシークレットタブの QWebEngineProfile を完全オフレコ化した
+    # ため、Chromium側のCookie/LocalStorage/HTTPキャッシュはそもそも
+    # ディスクに書かれなくなった。ただし strollon-pdf:// ビューア用の
+    # PDFキャッシュ（INCOGNITO_CACHE_PATH）はStrollon独自の仕組みで
+    # ディスクに書く必要があるため、こちらは引き続き掃除が必要。
+    # closeEvent でも削除を試みているが、終了時点ではファイルハンドルが
+    # 残っていることがあり（特にWindows）、ignore_errors=True で失敗が
+    # 握りつぶされて残留することがあった。起動時（＝どのファイルも
+    # 開かれていないタイミング）にも必ず掃除することで削除漏れを解消する。
+    import shutil as _shutil
+    for _incognito_leftover in (INCOGNITO_CACHE_PATH,):
+        try:
+            if _incognito_leftover.exists():
+                _shutil.rmtree(_incognito_leftover, ignore_errors=True)
+                log(f"[INFO] Incognito leftover data cleared (startup): {_incognito_leftover}")
+        except Exception as e:
+            log(f"[WARN] Incognito leftover clear failed: {e}")
 
     # strollon:// ハンドラ(IOスレッドから呼ばれる)がGUI操作を安全にメイン
     # スレッドへ委譲できるよう、確実にメインスレッド上でここに初期化する。
@@ -877,10 +1038,10 @@ def main():
     browser = VerticalTabBrowser()
     browser.show()
 
-    # 1.2.0.0-rc1: 自分が「唯一のインスタンス」であることが確定したので、
-    # 以後、2個目以降のプロセスからのCLI引数転送を受け取れるように
-    # サーバーを起動する。
-    browser.start_single_instance_server(_SINGLE_INSTANCE_NAME)
+    # 1.3.1.0: 先に確保しておいたシングルインスタンスサーバーの所有権と、
+    # サーバー起動からここまでの間に届いていたメッセージ（他プロセスから
+    # 転送されたCLI引数）を、このウィンドウへ引き継ぐ。
+    browser.adopt_single_instance_server(_single_instance_server, _single_instance_pending)
 
     # 1.2.0.0-rc1: コマンドライン引数（既定のブラウザとして起動された
     # 場合のURL/ファイルパス等）を解釈して開く。
