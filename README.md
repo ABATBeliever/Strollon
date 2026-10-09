@@ -5,6 +5,13 @@
 ![Status](https://img.shields.io/badge/status-Stable-orange.svg)
 ![Language](https://img.shields.io/badge/Language-Python-yellow.svg)
 
+# 警告 / Warning
+
+現在、すべてのバージョンのStrollonで Chromiumの脆弱性 CVE-2026-102322 の影響を受けることがわかっています。
+修正版「1.3.1.1」が配布されるまで、**全てのバージョンのStrollonの使用を控えるように**要請します。
+
+なお、2026年10月9日現在、上流のPySide6側の対応がまだ済んでいないため、修正ができません。
+
 <img width="1194" height="825" alt="スクリーンショット 2026-07-28 170724" src="https://github.com/user-attachments/assets/695c5c00-812c-4953-a31a-a6bd5a5b7533" />
 
 
